@@ -1,24 +1,38 @@
 name: Release
 
 on:
-  pull_request:
+  push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      version_bump:
+        description: 'Version bump type (patch / minor / major)'
+        required: false
+        default: patch
+
+permissions:
+  contents: write
+  packages: write
 
 jobs:
-  build:
+  release:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
+          distribution: temurin
           java-version: '21'
-          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x ./gradlew
 
       - name: Resolve next version
         id: ver
@@ -43,68 +57,28 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Next release: $TAG"
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Grant execute permission for gradlew
-        run: chmod +x ./gradlew
-
-      - name: Build with Gradle
-        run: ./gradlew build -Pversion=${{ steps.ver.outputs.version }} --no-daemon
-
-      - name: Create release artifact
-        run: ./gradlew shadowJar -Pversion=${{ steps.ver.outputs.version }} --no-daemon
+      - name: Build tool.jar
+        run: ./gradlew shadowJar -Pversion=${{ steps.ver.outputs.version }} --no-daemon --stacktrace
 
       - name: Stage release artifact
         run: |
           mkdir -p release
-          cp build/libs/Vicky-${{ steps.ver.outputs.version }}.jar "release/Vicky-${{ steps.ver.outputs.version }}.jar"
+          cp build/libs/tool-${{ steps.ver.outputs.version }}.jar "release/tool-${{ steps.ver.outputs.version }}.jar"
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Create tag and GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: Vicky-release
-          path: release/*.jar
-
-  create-github-release:
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Stage release artifact
-        run: |
-          mkdir -p release
-          cp build/libs/Vicky-${{ steps.ver.outputs.version }}.jar "release/Vicky-${{ steps.ver.outputs.version }}.jar"
-
-      - name: Create GitHub Release
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            release/tool-${{ steps.ver.outputs.version }}.jar
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG=${GITHUB_REF#refs/tags/}
-          gh release create "$TAG" \
-            --title "Release $TAG" \
-            --generate-release-notes
-
-      - name: Download artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: Vicky-release
-          path: release
-
-      - name: Upload release assets
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG=${GITHUB_REF#refs/tags/}
-          gh release upload "$TAG" release/*.jar
 
       - name: Publish to GitHub Packages
+        run: ./gradlew publish -Pversion=${{ steps.ver.outputs.version }} --no-daemon --stacktrace
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-        run: ./gradlew publish -Pversion=${{ steps.ver.outputs.version }} --no-daemon
