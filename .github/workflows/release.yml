@@ -1,14 +1,9 @@
 name: Release
 
 on:
-  push:
+  pull_request:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      version_bump:
-        description: 'Version bump type (patch / minor / major)'
-        required: false
-        default: patch
 
 jobs:
   build:
@@ -47,6 +42,12 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Next release: $TAG"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x ./gradlew
 
       - name: Build with Gradle
         run: ./gradlew build -Pversion=${{ steps.ver.outputs.version }} --no-daemon
