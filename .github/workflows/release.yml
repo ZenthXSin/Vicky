@@ -36,11 +36,23 @@ jobs:
 
       - name: Resolve next version
         id: ver
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           BUMP="${{ github.event.inputs.version_bump || 'patch' }}"
+          PKG="org.example.vicky.Vicky"
+          OWNER="${{ github.repository_owner }}"
+
+          # 已发布到 GitHub Packages 的版本（包不存在时 404，视为空）。
+          PUBLISHED=$(curl -s \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/users/$OWNER/packages/maven/$PKG/versions" \
+            | jq -r '.[].name' 2>/dev/null || true)
+
           LATEST=$(git tag --sort=-v:refname | head -n1)
           if [ -z "$LATEST" ]; then
-            TAG="v0.1.0"
+            MAJOR=0; MINOR=1; PATCH=0
           else
             MAJOR=$(echo "$LATEST" | sed 's/v\([0-9]*\).*/\1/')
             MINOR=$(echo "$LATEST" | sed 's/v[0-9]*\.\([0-9]*\).*/\1/')
@@ -50,8 +62,15 @@ jobs:
               minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
               *)    PATCH=$((PATCH + 1)) ;;
             esac
-            TAG="v${MAJOR}.${MINOR}.${PATCH}"
           fi
+
+          # 跳过已存在的 tag 或已发布的包版本，直到找到一个干净的号。
+          while git rev-parse "v${MAJOR}.${MINOR}.${PATCH}" >/dev/null 2>&1 \
+                || echo "$PUBLISHED" | grep -qx "${MAJOR}.${MINOR}.${PATCH}"; do
+            PATCH=$((PATCH + 1))
+          done
+
+          TAG="v${MAJOR}.${MINOR}.${PATCH}"
           VERSION="${TAG#v}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
