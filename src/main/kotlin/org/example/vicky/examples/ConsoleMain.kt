@@ -134,7 +134,7 @@ fun main() = runBlocking {
             apiKey = apiKey,
             baseUrl = baseUrl,
             mode = AgentMode.VERBOSE,
-            maxSteps = 6,
+            maxSteps = 60,
             think = true
         )
     )

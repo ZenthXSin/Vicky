@@ -112,7 +112,6 @@ abstract class Agent(
             history += assistant
 
             val calls = assistant.toolCalls.orEmpty()
-            assistant.content?.takeIf { it.isNotBlank() }?.let { logThink(it) }
             if (calls.isEmpty()) {
                 log("step ${step + 1}: no tool calls, finishing")
                 if (config.mode.emitAgentText) {
@@ -127,9 +126,13 @@ abstract class Agent(
                 return
             }
 
+            // 中间过程才算 think：模型的思考文本 + 即将调用的工具 (最后一轮的 content 是最终回答，不算)。
+            assistant.content?.takeIf { it.isNotBlank() }?.let { logThink(it) }
+
             for (call in calls) {
                 if (call !is ToolCall.Function) continue
                 val toolName = call.function.name
+                logThink("Use Tool: $toolName")
                 log("step ${step + 1}: invoking tool '$toolName'")
                 val result = invokeTool(msg, toolName, call.function.argumentsAsJson())
                 history += ChatMessage(
@@ -143,8 +146,26 @@ abstract class Agent(
                 }
             }
         }
-        // 达到 maxSteps 仍未给出最终回复，静默结束。
-        log("reached maxSteps (${config.maxSteps}) without a final reply")
+        // 步数耗尽：不再给工具，让模型基于已有信息整理现状并向用户汇报。
+        log("reached maxSteps (${config.maxSteps}); requesting a wrap-up summary")
+        history += ChatMessage(
+            role = ChatRole.User,
+            content = "System notice: the step budget for this turn is exhausted; no more tools can be " +
+                "called. Based on the information gathered so far, summarize the current situation and " +
+                "report your conclusion to the user, and explicitly note that some actions may be " +
+                "incomplete because the step limit was reached. Reply in the user's language.",
+        )
+        val wrapUp = openAi.chatCompletion(
+            ChatCompletionRequest(
+                model = config.model,
+                messages = history.toList(),
+                temperature = config.temperature,
+            )
+        ).choices.first().message
+        history += wrapUp
+        wrapUp.content?.takeIf { it.isNotBlank() }?.let {
+            emit(OutboundMessage.AgentReply(msg.conversationId, msg.userId, it))
+        }
         if (clearContextAfter) store.clear(msg.conversationId)
     }
 

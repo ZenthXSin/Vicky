@@ -30,5 +30,6 @@ class ClearContextTool : Tool() {
 object BuiltinTools {
     fun all(): List<Tool> = listOf(
         ClearContextTool(),
+        GithubTool(),
     )
 }

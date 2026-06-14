@@ -19,6 +19,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("org.slf4j:slf4j-simple:2.0.13")
 
+    implementation("top.mrxiaom.mirai:overflow-core:1.1.0")
+
     testImplementation(kotlin("test"))
 }
 
