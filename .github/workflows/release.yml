@@ -36,16 +36,11 @@ jobs:
 
       - name: Resolve next version
         id: ver
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           BUMP="${{ github.event.inputs.version_bump || 'patch' }}"
-          OWNER="${{ github.repository_owner }}"
-          REPO="${GITHUB_REPOSITORY#*/}"
-
           LATEST=$(git tag --sort=-v:refname | head -n1)
           if [ -z "$LATEST" ]; then
-            MAJOR=0; MINOR=1; PATCH=0
+            TAG="v0.1.0"
           else
             MAJOR=$(echo "$LATEST" | sed 's/v\([0-9]*\).*/\1/')
             MINOR=$(echo "$LATEST" | sed 's/v[0-9]*\.\([0-9]*\).*/\1/')
@@ -55,34 +50,8 @@ jobs:
               minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
               *)    PATCH=$((PATCH + 1)) ;;
             esac
-          fi
-
-          # 跳过已存在的 tag 或已发布的包版本，直到找到一个干净的号。
-          while true; do
             TAG="v${MAJOR}.${MINOR}.${PATCH}"
-            VERSION="${TAG#v}"
-            TAG_EXISTS=false
-            PKG_EXISTS=false
-
-            if git rev-parse "$TAG" >/dev/null 2>&1; then
-              TAG_EXISTS=true
-            fi
-
-            # 直接查询 Maven 仓库，确认该版本 jar 是否已存在。
-            URL="https://maven.pkg.github.com/$OWNER/$REPO/org/example/vicky/Vicky/$VERSION/Vicky-$VERSION.jar"
-            STATUS=$(curl -sSL -o /dev/null -w "%{http_code}" -u "$OWNER:$GITHUB_TOKEN" "$URL" || true)
-            if [ "$STATUS" = "200" ]; then
-              PKG_EXISTS=true
-            fi
-            echo "Candidate $VERSION: tag_exists=$TAG_EXISTS pkg_exists=$PKG_EXISTS (curl $STATUS)"
-
-            if [ "$TAG_EXISTS" = "false" ] && [ "$PKG_EXISTS" = "false" ]; then
-              break
-            fi
-            PATCH=$((PATCH + 1))
-          done
-
-          TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          fi
           VERSION="${TAG#v}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -108,19 +77,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish to GitHub Packages
-        run: |
-          set +e
-          OUT=$(./gradlew publish -Pversion=${{ steps.ver.outputs.version }} --no-daemon --stacktrace 2>&1)
-          CODE=$?
-          echo "$OUT"
-          if [ $CODE -ne 0 ]; then
-            # GitHub Packages 正式版本不可覆盖：版本已存在会返回 422，视为跳过而非失败。
-            if echo "$OUT" | grep -q "status code 422"; then
-              echo "::warning::Version ${{ steps.ver.outputs.version }} already exists in GitHub Packages — skipping publish."
-              exit 0
-            fi
-            exit $CODE
-          fi
+        run: ./gradlew publish -Pversion=${{ steps.ver.outputs.version }} --no-daemon --stacktrace
         env:
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
