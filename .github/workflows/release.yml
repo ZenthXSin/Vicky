@@ -15,6 +15,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -84,10 +87,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ steps.ver.outputs.tag }}"
+          TAG="${{ needs.build.outputs.tag }}"
           gh release create "$TAG" \
             --title "Release $TAG" \
-            --generate-release-notes
+            --generate-notes
 
       - name: Download artifact
         uses: actions/download-artifact@v4
@@ -99,7 +102,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ steps.ver.outputs.tag }}"
+          TAG="${{ needs.build.outputs.tag }}"
           gh release upload "$TAG" release/*.jar
 
       - name: Setup Gradle
@@ -113,4 +116,4 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-        run: ./gradlew publish -Pversion=${{ steps.ver.outputs.version }} --no-daemon
+        run: ./gradlew publish -Pversion=${{ needs.build.outputs.version }} --no-daemon
