@@ -18,6 +18,7 @@ import org.example.vicky.io.OutboundMessage
 import org.example.vicky.tool.Tool
 import org.example.vicky.tool.ToolAuthorizer
 import org.example.vicky.tool.ToolResult
+import org.example.vicky.tool.tool
 import java.net.InetSocketAddress
 import java.net.Socket
 
@@ -107,8 +108,10 @@ private class PingTool : Tool() {
 private class ConsoleAgent(config: AgentConfig) : Agent(config) {
     override val sink = MessageSink { out ->
         when (out) {
-            is OutboundMessage.AgentReply -> println("[agent] ${out.content}")
-            is OutboundMessage.ToolReply -> println("[tool:${out.toolName}] ${out.content}")
+            is OutboundMessage.AgentReply -> {}//println("[agent] ${out.content}")
+            is OutboundMessage.ToolReply -> {}//println("[tool:${out.toolName}] ${out.content}")
+            is OutboundMessage.Debug -> {}
+            is OutboundMessage.Think -> {}
         }
     }
     override val authorizer = ToolAuthorizer { userId, toolName ->
@@ -120,7 +123,7 @@ fun main() = runBlocking {
     // 修复 Windows 控制台中文乱码：强制 stdout 使用 UTF-8
     System.setOut(java.io.PrintStream(System.out, true, Charsets.UTF_8))
 
-    val apiKey = ""
+    val apiKey = "sk-Nhxs7MO3HDspptIICNmgobNdmeSc4RcIM6Aa4FLxvqgxeM6S"
     val baseUrl = "http://192.168.0.108:3000/v1" // 可选：兼容 OpenAI 协议的第三方端点
 
     val agent = ConsoleAgent(
@@ -130,11 +133,23 @@ fun main() = runBlocking {
             baseUrl = baseUrl,
             mode = AgentMode.SILENT,
             maxSteps = 6,
+            think = true
         )
     )
-    agent.registerTool(EchoTool())
     agent.registerTool(ShutdownTool())
     agent.registerTool(PingTool())
+
+    // 函数式工厂示例：无需继承 Tool，直接用 tool(...) 创建并注册。
+    agent.registerTool(
+        tool(
+            name = "now",
+            description = "Return the current local date-time.",
+            parameters = buildJsonObject { put("type", "object") },
+        ) { _, _ ->
+            val now = java.time.LocalDateTime.now().toString()
+            ToolResult(toAgent = now, userReply = "现在时间：$now")
+        }
+    )
 
     println("Vicky console agent. Type 'quit' to exit.")
     while (true) {
@@ -142,6 +157,13 @@ fun main() = runBlocking {
         val line = readlnOrNull()?.trim() ?: break
         if (line == "quit") break
         if (line.isEmpty()) continue
-        agent.receive(InboundMessage(userId = "user1", content = line))
+        agent.receive(InboundMessage(userId = "user1", content = line), {
+            when (it) {
+                is OutboundMessage.AgentReply -> println("[agent] ${it.content}")
+                is OutboundMessage.ToolReply -> println("[tool:${it.toolName}] ${it.content}")
+                is OutboundMessage.Debug -> println("[debug] ${it.content}")
+                is OutboundMessage.Think -> println("[think] ${it.content}")
+            }
+        })
     }
 }

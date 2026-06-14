@@ -23,7 +23,7 @@ object OpenAiClientFactory {
                 token = config.apiKey,
                 timeout = Timeout(socket = 60.seconds),
                 host = host,
-                logging = LoggingConfig(logLevel = LogLevel.None),
+                logging = LoggingConfig(logLevel = if (config.debug) LogLevel.All else LogLevel.None),
             )
         )
     }

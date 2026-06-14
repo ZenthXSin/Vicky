@@ -12,6 +12,8 @@ import com.aallam.openai.api.model.ModelId
  * @property mode 模式 1 (SILENT) 或模式 2 (VERBOSE)。
  * @property temperature 透传给 chat completion。
  * @property agentMd 基础系统提示文本 (人设/指令)，直接内联，不再读文件。
+ * @property debug 打开后输出框架运行日志 (每轮推理 / 工具调用) 及底层 HTTP 日志。
+ * @property think 打开后把 agent 每轮的中间思考文本 (调用工具前的 content) 打到日志。
  */
 data class AgentConfig(
     val model: ModelId,
@@ -21,4 +23,7 @@ data class AgentConfig(
     val mode: AgentMode = AgentMode.SILENT,
     val temperature: Double? = null,
     val agentMd: String = "You are a helpful assistant.",
+    val debug: Boolean = false,
+    val think: Boolean = false,
+    val builtinTools: Boolean = true,
 )

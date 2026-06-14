@@ -19,4 +19,18 @@ sealed interface OutboundMessage {
         override val content: String,
         val toolName: String,
     ) : OutboundMessage
+
+    /** 框架运行日志 (config.debug 打开时推出)，面向开发者而非用户。 */
+    data class Debug(
+        override val conversationId: String,
+        override val userId: String,
+        override val content: String,
+    ) : OutboundMessage
+
+    /** Agent 每轮的中间思考文本 (config.think 打开时推出)。 */
+    data class Think(
+        override val conversationId: String,
+        override val userId: String,
+        override val content: String,
+    ) : OutboundMessage
 }

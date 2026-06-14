@@ -4,9 +4,8 @@ import com.aallam.openai.api.chat.ChatCompletionRequest
 import com.aallam.openai.api.chat.ChatMessage
 import com.aallam.openai.api.chat.ChatRole
 import com.aallam.openai.api.chat.FunctionTool
-import com.aallam.openai.api.chat.Parameters
+import com.aallam.openai.api.core.Parameters
 import com.aallam.openai.api.chat.ToolCall
-import com.aallam.openai.api.chat.ToolId
 import com.aallam.openai.api.chat.ToolType
 import com.aallam.openai.client.OpenAI
 import kotlinx.serialization.json.Json
@@ -18,8 +17,10 @@ import org.example.vicky.io.OutboundMessage
 import org.example.vicky.llm.OpenAiClientFactory
 import org.example.vicky.tool.Tool
 import org.example.vicky.tool.ToolAuthorizer
+import org.example.vicky.tool.ToolContext
 import org.example.vicky.tool.ToolRegistry
 import org.example.vicky.tool.ToolResult
+import org.example.vicky.tool.builtin.BuiltinTools
 import com.aallam.openai.api.chat.Tool as OAITool
 
 /**
@@ -51,6 +52,10 @@ abstract class Agent(
 ) {
     val tools: ToolRegistry = ToolRegistry()
 
+    init {
+        if (config.builtinTools) BuiltinTools.all().forEach { tools.register(it) }
+    }
+
     /** 子类提供：消息出口。 */
     protected abstract val sink: MessageSink
 
@@ -61,16 +66,36 @@ abstract class Agent(
     fun registerTool(tool: Tool) = tools.register(tool)
     fun unregisterTool(name: String): Tool? = tools.unregister(name)
 
-    /** 入口：外部把收到的消息丢进来。 */
-    suspend fun receive(msg: InboundMessage) {
+    /**
+     * 入口：外部把收到的消息丢进来。
+     * @param replySink 可选的单次出口，每条面向 user 的输出都会**实时**发一份。
+     *                  与构造时注入的 [sink] 并存，两者都会收到。
+     */
+    suspend fun receive(msg: InboundMessage, replySink: MessageSink? = null) {
         val history = store.history(msg.conversationId)
         ensureSystemPrompt(history)
         history += ChatMessage(role = ChatRole.User, content = msg.content)
 
+        // 同时发到注入的 sink 和（可选）单次 replySink。
+        suspend fun emit(out: OutboundMessage) {
+            sink.emit(out)
+            replySink?.emit(out)
+        }
+
+        // 日志走 MessageSink，由外部决定如何呈现/丢弃。
+        suspend fun log(message: String) {
+            if (config.debug) emit(OutboundMessage.Debug(msg.conversationId, msg.userId, message))
+        }
+
+        suspend fun logThink(content: String) {
+            if (config.think) emit(OutboundMessage.Think(msg.conversationId, msg.userId, content))
+        }
+
         // 模式决定是否传工具（如 CHAT 不传）。
         val oaiTools = if (config.mode.toolsEnabled) buildOpenAiTools() else emptyList()
 
-        repeat(config.maxSteps) {
+        repeat(config.maxSteps) { step ->
+            log("step ${step + 1}/${config.maxSteps} -> requesting completion (${history.size} msgs)")
             val request = ChatCompletionRequest(
                 model = config.model,
                 messages = history.toList(),
@@ -81,11 +106,17 @@ abstract class Agent(
             history += assistant
 
             val calls = assistant.toolCalls.orEmpty()
+            assistant.content?.takeIf { it.isNotBlank() }?.let { logThink(it) }
             if (calls.isEmpty()) {
+                log("step ${step + 1}: no tool calls, finishing")
                 if (config.mode.emitAgentText) {
                     assistant.content?.takeIf { it.isNotBlank() }?.let {
-                        sink.emit(OutboundMessage.AgentReply(msg.conversationId, msg.userId, it))
+                        emit(OutboundMessage.AgentReply(msg.conversationId, msg.userId, it))
                     }
+                }
+                if (config.mode.clearAfterReply) {
+                    store.clear(msg.conversationId)
+                    log("cleared context for '${msg.conversationId}' (mode ${config.mode.name})")
                 }
                 return
             }
@@ -93,6 +124,7 @@ abstract class Agent(
             for (call in calls) {
                 if (call !is ToolCall.Function) continue
                 val toolName = call.function.name
+                log("step ${step + 1}: invoking tool '$toolName'")
                 val result = invokeTool(msg, toolName, call.function.argumentsAsJson())
                 history += ChatMessage(
                     role = ChatRole.Tool,
@@ -101,11 +133,13 @@ abstract class Agent(
                     content = result.toAgent,
                 )
                 result.userReply?.takeIf { it.isNotBlank() }?.let {
-                    sink.emit(OutboundMessage.ToolReply(msg.conversationId, msg.userId, it, toolName))
+                    emit(OutboundMessage.ToolReply(msg.conversationId, msg.userId, it, toolName))
                 }
             }
         }
         // 达到 maxSteps 仍未给出最终回复，静默结束。
+        log("reached maxSteps (${config.maxSteps}) without a final reply")
+        if (config.mode.clearAfterReply) store.clear(msg.conversationId)
     }
 
     private suspend fun invokeTool(
@@ -118,7 +152,8 @@ abstract class Agent(
         if (!authorizer.allow(msg.userId, toolName)) {
             return ToolResult(toAgent = "Error: permission denied for user '${msg.userId}' on tool '$toolName'.")
         }
-        return runCatching { tool.execute(msg.userId, args) }
+        val ctx = ToolContext(msg.userId, msg.conversationId, store, tools)
+        return runCatching { tool.execute(ctx, args) }
             .getOrElse { ToolResult(toAgent = "Error executing '$toolName': ${it.message}") }
     }
 
