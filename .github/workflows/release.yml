@@ -1,11 +1,14 @@
 name: Release
 
 on:
-  pull_request:
-    branches: [ main ]
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version_bump:
+        description: 'Version bump type (patch / minor / major)'
+        required: false
+        default: patch
 
 jobs:
   build:
@@ -25,11 +28,25 @@ jobs:
       - name: Resolve next version
         id: ver
         run: |
-          TAG=${GITHUB_REF#refs/tags/}
-          VERSION=${TAG#v}
+          BUMP="${{ github.event.inputs.version_bump || 'patch' }}"
+          LATEST=$(git tag --sort=-v:refname | head -n1)
+          if [ -z "$LATEST" ]; then
+            TAG="v0.1.0"
+          else
+            MAJOR=$(echo "$LATEST" | sed 's/v\([0-9]*\).*/\1/')
+            MINOR=$(echo "$LATEST" | sed 's/v[0-9]*\.\([0-9]*\).*/\1/')
+            PATCH=$(echo "$LATEST" | sed 's/v[0-9]*\.[0-9]*\.\([0-9]*\)/\1/')
+            case "$BUMP" in
+              major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+              minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+              *)    PATCH=$((PATCH + 1)) ;;
+            esac
+            TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          fi
+          VERSION="${TAG#v}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Release: $TAG (version=$VERSION)"
+          echo "Next release: $TAG"
 
       - name: Build with Gradle
         run: ./gradlew build -Pversion=${{ steps.ver.outputs.version }} --no-daemon
