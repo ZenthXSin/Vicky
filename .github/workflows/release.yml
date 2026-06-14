@@ -15,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      packages: write
     outputs:
       tag: ${{ steps.ver.outputs.tag }}
       version: ${{ steps.ver.outputs.version }}
@@ -89,6 +90,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -123,7 +125,25 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x ./gradlew
 
+      - name: Check if package version already exists
+        id: check-pkg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ needs.build.outputs.version }}"
+          OWNER="${{ github.repository_owner }}"
+          PKG_NAME="org.example.vicky.Vicky"
+          EXISTING=$(gh api "/users/$OWNER/packages/maven/$PKG_NAME/versions" --jq ".[] | select(.name==\"$VERSION\") | .name" 2>/dev/null || true)
+          if [ -n "$EXISTING" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Package version $VERSION already exists in GitHub Packages, skipping publish."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Package version $VERSION not found, will publish."
+          fi
+
       - name: Publish to GitHub Packages
+        if: steps.check-pkg.outputs.exists != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
