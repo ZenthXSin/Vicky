@@ -77,7 +77,19 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish to GitHub Packages
-        run: ./gradlew publish -Pversion=${{ steps.ver.outputs.version }} --no-daemon --stacktrace
+        run: |
+          set +e
+          OUT=$(./gradlew publish -Pversion=${{ steps.ver.outputs.version }} --no-daemon --stacktrace 2>&1)
+          CODE=$?
+          echo "$OUT"
+          if [ $CODE -ne 0 ]; then
+            # GitHub Packages 正式版本不可覆盖：版本已存在会返回 422，视为跳过而非失败。
+            if echo "$OUT" | grep -q "status code 422"; then
+              echo "::warning::Version ${{ steps.ver.outputs.version }} already exists in GitHub Packages — skipping publish."
+              exit 0
+            fi
+            exit $CODE
+          fi
         env:
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
