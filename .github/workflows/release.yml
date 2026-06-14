@@ -40,15 +40,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           BUMP="${{ github.event.inputs.version_bump || 'patch' }}"
-          PKG="org.example.vicky.Vicky"
           OWNER="${{ github.repository_owner }}"
-
-          # 已发布到 GitHub Packages 的版本（包不存在时 404，视为空）。
-          PUBLISHED=$(curl -s \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/users/$OWNER/packages/maven/$PKG/versions" \
-            | jq -r '.[].name' 2>/dev/null || true)
+          REPO="${GITHUB_REPOSITORY#*/}"
 
           LATEST=$(git tag --sort=-v:refname | head -n1)
           if [ -z "$LATEST" ]; then
@@ -65,8 +58,27 @@ jobs:
           fi
 
           # 跳过已存在的 tag 或已发布的包版本，直到找到一个干净的号。
-          while git rev-parse "v${MAJOR}.${MINOR}.${PATCH}" >/dev/null 2>&1 \
-                || echo "$PUBLISHED" | grep -qx "${MAJOR}.${MINOR}.${PATCH}"; do
+          while true; do
+            TAG="v${MAJOR}.${MINOR}.${PATCH}"
+            VERSION="${TAG#v}"
+            TAG_EXISTS=false
+            PKG_EXISTS=false
+
+            if git rev-parse "$TAG" >/dev/null 2>&1; then
+              TAG_EXISTS=true
+            fi
+
+            # 直接查询 Maven 仓库，确认该版本 jar 是否已存在。
+            URL="https://maven.pkg.github.com/$OWNER/$REPO/org/example/vicky/Vicky/$VERSION/Vicky-$VERSION.jar"
+            STATUS=$(curl -sSL -o /dev/null -w "%{http_code}" -u "$OWNER:$GITHUB_TOKEN" "$URL" || true)
+            if [ "$STATUS" = "200" ]; then
+              PKG_EXISTS=true
+            fi
+            echo "Candidate $VERSION: tag_exists=$TAG_EXISTS pkg_exists=$PKG_EXISTS (curl $STATUS)"
+
+            if [ "$TAG_EXISTS" = "false" ] && [ "$PKG_EXISTS" = "false" ]; then
+              break
+            fi
             PATCH=$((PATCH + 1))
           done
 
