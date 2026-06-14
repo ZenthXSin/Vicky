@@ -52,14 +52,6 @@ jobs:
             esac
             TAG="v${MAJOR}.${MINOR}.${PATCH}"
           fi
-          # 如果目标 tag 已存在（例如之前 release 创建失败但 tag 已创建），自动递增
-          while git rev-parse "$TAG" >/dev/null 2>&1; do
-            MAJOR=$(echo "$TAG" | sed 's/v\([0-9]*\).*/\1/')
-            MINOR=$(echo "$TAG" | sed 's/v[0-9]*\.\([0-9]*\).*/\1/')
-            PATCH=$(echo "$TAG" | sed 's/v[0-9]*\.[0-9]*\.\([0-9]*\)/\1/')
-            PATCH=$((PATCH + 1))
-            TAG="v${MAJOR}.${MINOR}.${PATCH}"
-          done
           VERSION="${TAG#v}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -84,28 +76,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Check if package version already exists
-        id: check-pkg
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          VERSION="${{ steps.ver.outputs.version }}"
-          OWNER="${{ github.repository_owner }}"
-          PKG_NAME="org.example.vicky.Vicky"
-          echo "Checking package versions for $PKG_NAME..."
-          RESPONSE=$(gh api "/users/$OWNER/packages/maven/$PKG_NAME/versions" 2>/dev/null || true)
-          echo "Package versions response: $RESPONSE"
-          EXISTING=$(echo "$RESPONSE" | jq -r ".[] | select(.name==\"$VERSION\") | .name" 2>/dev/null || true)
-          if [ -n "$EXISTING" ]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Package version $VERSION already exists in GitHub Packages, skipping publish."
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "Package version $VERSION not found, will publish."
-          fi
-
       - name: Publish to GitHub Packages
-        if: steps.check-pkg.outputs.exists != 'true'
         run: ./gradlew publish -Pversion=${{ steps.ver.outputs.version }} --no-daemon --stacktrace
         env:
           GITHUB_ACTOR: ${{ github.actor }}
