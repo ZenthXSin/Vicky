@@ -59,7 +59,7 @@ publishing {
         create<MavenPublication>("maven") {
             from(components["java"])
             groupId = project.group.toString()
-            artifactId = "Vicky"
+            artifactId = "vicky"
             version = project.version.toString()
         }
     }
