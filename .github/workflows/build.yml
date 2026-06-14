@@ -2,7 +2,7 @@ name: Build
 
 on:
   pull_request:
-    branches: [main]
+    branches: [master]
   workflow_dispatch:
 
 jobs:
@@ -23,12 +23,12 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x ./gradlew
 
-      - name: Build tool.jar
+      - name: Build Vicky.jar
         run: ./gradlew shadowJar --no-daemon --stacktrace
 
-      - name: Upload tool.jar artifact
+      - name: Upload Vicky.jar artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tool-jar
+          name: Vicky-jar
           path: build/libs/*.jar
           if-no-files-found: error
