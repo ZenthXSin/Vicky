@@ -56,22 +56,24 @@ private class ShutdownTool : Tool() {
 private class PingTool : Tool() {
     override val name = "ping"
     override val description =
-        "Measure network latency to a host via TCP connect. " +
-            "Args: host (required), port (default 80), count (default 4), timeoutMs (default 3000)."
+        "Measure network latency to a host via TCP connect. " + "Args: host (required), port (default 80), count (default 4), timeoutMs (default 3000)."
     override val parameters: JsonObject = buildJsonObject {
         put("type", "object")
         putJsonObject("properties") {
             putJsonObject("host") { put("type", "string"); put("description", "Target IP or hostname.") }
             putJsonObject("port") { put("type", "integer"); put("description", "TCP port, default 80.") }
             putJsonObject("count") { put("type", "integer"); put("description", "Attempts, default 4.") }
-            putJsonObject("timeoutMs") { put("type", "integer"); put("description", "Per-attempt timeout ms, default 3000.") }
+            putJsonObject("timeoutMs") {
+                put("type", "integer"); put(
+                "description", "Per-attempt timeout ms, default 3000."
+            )
+            }
         }
         put("required", buildJsonArray { add(kotlinx.serialization.json.JsonPrimitive("host")) })
     }
 
     override suspend fun execute(userId: String, args: JsonObject): ToolResult {
-        val host = args["host"]?.jsonPrimitive?.content
-            ?: return ToolResult(toAgent = "Error: missing 'host'.")
+        val host = args["host"]?.jsonPrimitive?.content ?: return ToolResult(toAgent = "Error: missing 'host'.")
         val port = args["port"]?.jsonPrimitive?.int ?: 80
         val count = (args["count"]?.jsonPrimitive?.int ?: 4).coerceIn(1, 20)
         val timeoutMs = args["timeoutMs"]?.jsonPrimitive?.int ?: 3000
@@ -86,9 +88,9 @@ private class PingTool : Tool() {
         val summary = if (latencies.isEmpty()) {
             "ping $host:$port -> all $count attempts failed (timeout/unreachable)."
         } else {
-            "ping $host:$port -> ${latencies.size}/$count ok, " +
-                "min=${latencies.min()}ms avg=${latencies.average().toLong()}ms max=${latencies.max()}ms" +
-                if (failures > 0) " ($failures failed)" else ""
+            "ping $host:$port -> ${latencies.size}/$count ok, " + "min=${latencies.min()}ms avg=${
+                latencies.average().toLong()
+            }ms max=${latencies.max()}ms" + if (failures > 0) " ($failures failed)" else ""
         }
         return ToolResult(toAgent = summary, userReply = "对 $host:$port 的 ping 测试已完成，结果如下：\n$summary")
     }
@@ -131,7 +133,7 @@ fun main() = runBlocking {
             model = ModelId("deepseek-v4-flash"),
             apiKey = apiKey,
             baseUrl = baseUrl,
-            mode = AgentMode.SILENT,
+            mode = AgentMode.VERBOSE,
             maxSteps = 6,
             think = true
         )
@@ -148,8 +150,7 @@ fun main() = runBlocking {
         ) { _, _ ->
             val now = java.time.LocalDateTime.now().toString()
             ToolResult(toAgent = now, userReply = "现在时间：$now")
-        }
-    )
+        })
 
     println("Vicky console agent. Type 'quit' to exit.")
     while (true) {
@@ -157,7 +158,9 @@ fun main() = runBlocking {
         val line = readlnOrNull()?.trim() ?: break
         if (line == "quit") break
         if (line.isEmpty()) continue
-        agent.receive(InboundMessage(userId = "user1", content = line), {
+        agent.receive(clearContextAfter = true,
+            msg = InboundMessage(userId = "user1", content = line),
+            replySink = {
             when (it) {
                 is OutboundMessage.AgentReply -> println("[agent] ${it.content}")
                 is OutboundMessage.ToolReply -> println("[tool:${it.toolName}] ${it.content}")

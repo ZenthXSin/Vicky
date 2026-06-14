@@ -70,8 +70,14 @@ abstract class Agent(
      * 入口：外部把收到的消息丢进来。
      * @param replySink 可选的单次出口，每条面向 user 的输出都会**实时**发一份。
      *                  与构造时注入的 [sink] 并存，两者都会收到。
+     * @param clearContextAfter 为 true 时，本轮结束 (给出最终回复或耗尽 maxSteps) 后自动清空该会话上下文，
+     *                          实现「单次无状态」请求。下一条消息从空历史开始。
      */
-    suspend fun receive(msg: InboundMessage, replySink: MessageSink? = null) {
+    suspend fun receive(
+        msg: InboundMessage,
+        replySink: MessageSink? = null,
+        clearContextAfter: Boolean = false,
+    ) {
         val history = store.history(msg.conversationId)
         ensureSystemPrompt(history)
         history += ChatMessage(role = ChatRole.User, content = msg.content)
@@ -114,9 +120,9 @@ abstract class Agent(
                         emit(OutboundMessage.AgentReply(msg.conversationId, msg.userId, it))
                     }
                 }
-                if (config.mode.clearAfterReply) {
+                if (clearContextAfter) {
                     store.clear(msg.conversationId)
-                    log("cleared context for '${msg.conversationId}' (mode ${config.mode.name})")
+                    log("cleared context for '${msg.conversationId}' after reply")
                 }
                 return
             }
@@ -139,7 +145,7 @@ abstract class Agent(
         }
         // 达到 maxSteps 仍未给出最终回复，静默结束。
         log("reached maxSteps (${config.maxSteps}) without a final reply")
-        if (config.mode.clearAfterReply) store.clear(msg.conversationId)
+        if (clearContextAfter) store.clear(msg.conversationId)
     }
 
     private suspend fun invokeTool(
