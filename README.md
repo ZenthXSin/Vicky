@@ -1,5 +1,7 @@
 # Vicky | 未奇
 
+![未奇(AI生成)](src/main/resources/vicky.png)
+
 灵感来源于**SCP: 4K**中**黑洞纪元**的舰载**人工智能** -- **未奇**
 
 一个精简、易维护的 Kotlin Agent 框架，对接 **OpenAI 通用协议**（兼容任意 OpenAI 协议端点：OpenAI / DeepSeek / one-api / 本地推理服务等）。
