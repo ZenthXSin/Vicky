@@ -105,9 +105,15 @@ private class PingTool : Tool() {
 fun main() = runBlocking {
     System.setOut(java.io.PrintStream(System.out, true, Charsets.UTF_8))
 
-    val (configData, agentMd) = ConfigManager.loadOrCreate()
-    val agentConfig = ConfigManager.toAgentConfig(configData, agentMd)
-    val oneBotConfig = configData.oneBot
+    val result = ConfigManager.loadOrCreate()
+    if (result.firstRun) {
+        println("首次运行，已生成配置文件: ${ConfigManager.getConfigDir().absolutePath}")
+        println("请修改 config.json 和 agentMd 文件后重新运行。")
+        return@runBlocking
+    }
+
+    val agentConfig = ConfigManager.toAgentConfig(result.config, result.agentMd)
+    val oneBotConfig = result.config.oneBot
 
     println("配置已加载: ${ConfigManager.getConfigDir().absolutePath}")
 
