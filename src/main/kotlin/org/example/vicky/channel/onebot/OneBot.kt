@@ -1,0 +1,297 @@
+package org.example.vicky.channel.onebot
+
+import kotlinx.coroutines.withContext
+import net.mamoe.mirai.Bot
+import net.mamoe.mirai.contact.Group
+import net.mamoe.mirai.contact.nameCardOrNick
+import net.mamoe.mirai.event.EventPriority
+import net.mamoe.mirai.event.events.FriendMessageEvent
+import net.mamoe.mirai.event.events.GroupMessageEvent
+import net.mamoe.mirai.event.events.StrangerMessageEvent
+import net.mamoe.mirai.message.data.*
+import net.mamoe.mirai.message.data.Image.Key.queryUrl
+import org.example.vicky.agent.Agent
+import org.example.vicky.agent.AgentConfig
+import org.example.vicky.io.InboundMessage
+import org.example.vicky.io.MessageSink
+import org.example.vicky.io.OutboundMessage
+import org.example.vicky.tool.ToolAuthorizer
+import top.mrxiaom.overflow.BotBuilder
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
+
+class OneBot(
+    var agentConfig: AgentConfig,
+    var url: String,
+    var token: String,
+) {
+    val adminList = mutableSetOf<String>()
+    val adminToolList = mutableSetOf<String>()
+    val buffer = MessageBuffer()
+
+    /** 消息序号计数器，为每条消息分配唯一递增 ID。 */
+    private val msgCounter = AtomicLong(0)
+
+    /** 消息源缓存: msgRef -> MessageSource，供 reply_message 工具引用。 */
+    val messageSourceCache = ConcurrentHashMap<String, MessageSource>()
+
+    var bot: Bot? = null
+        private set
+
+    lateinit var agent: OneBotAgent
+        private set
+
+    /** 连接并注册三个事件监听器。 */
+    suspend fun connect(): Boolean {
+        bot = BotBuilder.positive(url).token(token).connect() ?: return false
+        agent = OneBotAgent(agentConfig, bot!!, buffer, adminList, adminToolList)
+        agent.registerTool(GetMessagesTool())
+        // Register mirai L1 tools
+        agent.registerTool(BotInfoTool(bot!!))
+        agent.registerTool(ContactsTool(bot!!))
+        agent.registerTool(GroupInfoTool(bot!!))
+        agent.registerTool(GroupMembersTool(bot!!))
+        agent.registerTool(UserProfileTool(bot!!))
+        // Register mirai L2 tools (write operations, admin-gated)
+        listOf("send_message", "group_manage", "friend_manage", "group_quit", "group_announcements")
+            .forEach { adminToolList.add(it) }
+        agent.registerTool(SendMessageTool(bot!!))
+        agent.registerTool(GroupManageTool(bot!!))
+        agent.registerTool(FriendManageTool(bot!!))
+        agent.registerTool(GroupQuitTool(bot!!))
+        agent.registerTool(GroupAnnouncementsTool(bot!!))
+        // Register at & reply tools
+        agent.registerTool(AtTool(bot!!))
+        agent.registerTool(ReplyMessageTool(bot!!, messageSourceCache))
+        registerListeners()
+        return true
+    }
+
+    // region 事件监听
+
+    private fun registerListeners() {
+        val b = bot ?: return
+        val channel = b.eventChannel
+
+        // 监听器A: 全量消息 (群+好友) → 拆分存入缓冲区
+        // HIGHEST 优先于 NORMAL，确保缓冲先于触发。
+        channel.subscribeAlways<GroupMessageEvent>(priority = EventPriority.HIGHEST) {
+            val ref = "#${msgCounter.incrementAndGet()}"
+            messageSourceCache[ref] = message.source
+            // 缓存上限: 保留最近 2000 条
+            while (messageSourceCache.size > 2000) {
+                val oldest = messageSourceCache.keys.firstOrNull()
+                if (oldest != null) messageSourceCache.remove(oldest)
+            }
+            val (text, richMedia) = parseMessage(message)
+            buffer.store(
+                conversationId = group.id.toString(),
+                message = BufferedMessage(
+                    text = text,
+                    richMedia = richMedia,
+                    raw = message.toString(),
+                    userId = sender.id.toString(),
+                    senderName = sender.nameCardOrNick,
+                    msgRef = ref,
+                )
+            )
+        }
+        channel.subscribeAlways<FriendMessageEvent>(priority = EventPriority.HIGHEST) {
+            val ref = "#${msgCounter.incrementAndGet()}"
+            messageSourceCache[ref] = message.source
+            while (messageSourceCache.size > 2000) {
+                val oldest = messageSourceCache.keys.firstOrNull()
+                if (oldest != null) messageSourceCache.remove(oldest)
+            }
+            val (text, richMedia) = parseMessage(message)
+            buffer.store(
+                conversationId = sender.id.toString(),
+                message = BufferedMessage(
+                    text = text,
+                    richMedia = richMedia,
+                    raw = message.toString(),
+                    userId = sender.id.toString(),
+                    senderName = sender.nick,
+                    msgRef = ref,
+                )
+            )
+        }
+        // 陌生人/临时会话消息 → 存入缓冲区
+        channel.subscribeAlways<StrangerMessageEvent>(priority = EventPriority.HIGHEST) {
+            val ref = "#${msgCounter.incrementAndGet()}"
+            messageSourceCache[ref] = message.source
+            while (messageSourceCache.size > 2000) {
+                val oldest = messageSourceCache.keys.firstOrNull()
+                if (oldest != null) messageSourceCache.remove(oldest)
+            }
+            val (text, richMedia) = parseMessage(message)
+            buffer.store(
+                conversationId = sender.id.toString(),
+                message = BufferedMessage(
+                    text = text,
+                    richMedia = richMedia,
+                    raw = message.toString(),
+                    userId = sender.id.toString(),
+                    senderName = sender.nick,
+                    msgRef = ref,
+                )
+            )
+        }
+
+        // 监听器B: 群消息 → 检测 @Bot → 触发 Agent
+        channel.subscribeAlways<GroupMessageEvent> {
+            if (isBotMentioned(message, b)) {
+                val inbound = buildInboundFromBuffer(
+                    conversationId = group.id.toString(),
+                    userId = sender.id.toString(),
+                    groupId = group.id.toString(),
+                    groupName = group.name,
+                    currentText = message.content,
+                    senderName = sender.nameCardOrNick,
+                )
+                agent.receive(inbound)
+            }
+        }
+
+        // 监听器C: 好友消息 → 全部触发 Agent
+        channel.subscribeAlways<FriendMessageEvent> {
+            val inbound = buildInboundFromBuffer(
+                conversationId = sender.id.toString(),
+                userId = sender.id.toString(),
+                groupId = "",
+                groupName = "",
+                currentText = message.content,
+                senderName = sender.nick,
+            )
+            agent.receive(inbound)
+        }
+
+        // 监听器D: 陌生人/临时会话消息 → 全部触发 Agent
+        channel.subscribeAlways<StrangerMessageEvent> {
+            val inbound = buildInboundFromBuffer(
+                conversationId = sender.id.toString(),
+                userId = sender.id.toString(),
+                groupId = "",
+                groupName = "",
+                currentText = message.content,
+                senderName = sender.nick,
+            )
+            agent.receive(inbound)
+        }
+    }
+
+    // endregion
+
+    // region 消息处理
+
+    /** 拆分 MessageChain 为纯文本 + 富媒体列表。 */
+    private suspend fun parseMessage(message: MessageChain): Pair<String, List<RichMediaItem>> {
+        val textParts = mutableListOf<String>()
+        val media = mutableListOf<RichMediaItem>()
+
+        for (elem in message) {
+            when (elem) {
+                is PlainText -> if (elem.content.isNotBlank()) textParts += elem.content.trim()
+                is Image -> media += RichMediaItem(
+                    type = "image",
+                    description = elem.imageId,
+                    url = runCatching { elem.queryUrl() }.getOrDefault(""),
+                    raw = elem.toString(),
+                )
+                is FlashImage -> media += RichMediaItem(
+                    type = "flashImage",
+                    description = elem.image.imageId,
+                    url = runCatching { elem.image.queryUrl() }.getOrDefault(""),
+                    raw = elem.toString(),
+                )
+                // At / AtAll / Face 等不纳入纯文本也不纳入富媒体
+                else -> {}
+            }
+        }
+        return textParts.joinToString(" ") to media
+    }
+
+    /** 检测消息中是否 @Bot。 */
+    private fun isBotMentioned(message: MessageChain, bot: Bot): Boolean =
+        message.any { it is At && it.target == bot.id }
+
+    /**
+     * 从缓冲区构建 InboundMessage：
+     * 注入群/好友元数据 + 近期文本上下文 + 当前消息，
+     * 让 Agent 能看到聊天环境和前因后果。
+     */
+    private fun buildInboundFromBuffer(
+        conversationId: String,
+        userId: String,
+        groupId: String,
+        groupName: String,
+        currentText: String,
+        senderName: String,
+    ): InboundMessage {
+        val recentText = buffer.getText(conversationId)
+        val sb = StringBuilder()
+        // 环境元数据
+        if (groupId.isNotEmpty()) {
+            sb.appendLine("[群聊: $groupName($groupId)]")
+        } else {
+            sb.appendLine("[私聊]")
+        }
+        // 近期聊天记录
+        if (recentText.isNotEmpty()) {
+            sb.appendLine("--- 近期聊天记录 ---")
+            recentText.forEach {
+                val refTag = if (it.msgRef.isNotEmpty()) "${it.msgRef} " else ""
+                sb.appendLine("$refTag[${it.senderName}:${it.userId}] ${it.text}")
+            }
+            sb.appendLine("--- 当前消息 ---")
+        }
+        sb.append("[$senderName:$userId] $currentText")
+        return InboundMessage(
+            userId = userId,
+            content = sb.toString(),
+            conversationId = conversationId,
+            groupId = groupId,
+        )
+    }
+
+    // endregion
+
+    // region Agent 子类
+
+    class OneBotAgent(
+        config: AgentConfig,
+        private val bot: Bot,
+        override val buffer: MessageBuffer,
+        private val adminList: Set<String>,
+        private val adminToolList: Set<String>,
+    ) : Agent(config) {
+
+        override val sink = MessageSink { out ->
+            when (out) {
+                is OutboundMessage.AgentReply,
+                is OutboundMessage.ToolReply -> {
+                    val text = out.content
+                    when {
+                        out.groupId.isNotEmpty() ->
+                            bot.getGroup(out.groupId.toLongOrNull() ?: return@MessageSink)
+                                ?.sendMessage(text)
+                        else -> {
+                            val uid = out.userId.toLongOrNull() ?: return@MessageSink
+                            // 优先好友，fallback 到陌生人/临时会话
+                            val contact = bot.getFriend(uid) ?: bot.getStranger(uid)
+                            contact?.sendMessage(text)
+                        }
+                    }
+                }
+                is OutboundMessage.Debug -> { println("DEBUG: ${out.content}") }
+                is OutboundMessage.Think -> { println("THINK: ${out.content}") }
+            }
+        }
+
+        override val authorizer = ToolAuthorizer { userId, toolName ->
+            if (adminToolList.contains(toolName)) adminList.contains(userId) else true
+        }
+    }
+
+    // endregion
+}

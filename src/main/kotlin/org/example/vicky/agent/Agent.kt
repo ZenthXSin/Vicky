@@ -37,6 +37,7 @@ import com.aallam.openai.api.chat.Tool as OAITool
  *       history += assistantToolCall
  *       history += toolMessage(result.toAgent)
  *       result.userReply?.let { sink.emit(ToolReply) }   // 实时输出
+ *     if any result.endTurn: return   // 工具发信号，结束本轮思考
  *     continue
  *   else:
  *     if mode == VERBOSE: sink.emit(AgentReply(resp.content))
@@ -61,6 +62,9 @@ abstract class Agent(
 
     /** 子类提供：工具权限。默认全允许可在子类中 override。 */
     protected open val authorizer: ToolAuthorizer = ToolAuthorizer.ALLOW_ALL
+
+    /** 子类提供：消息缓冲区。控制台等无缓冲场景保持 null。 */
+    protected open val buffer: org.example.vicky.channel.onebot.MessageBuffer? = null
 
     /** 运行时注册工具。 */
     fun registerTool(tool: Tool) = tools.register(tool)
@@ -90,11 +94,11 @@ abstract class Agent(
 
         // 日志走 MessageSink，由外部决定如何呈现/丢弃。
         suspend fun log(message: String) {
-            if (config.debug) emit(OutboundMessage.Debug(msg.conversationId, msg.userId, message))
+            if (config.debug) emit(OutboundMessage.Debug(msg.conversationId, msg.userId, msg.groupId, message))
         }
 
         suspend fun logThink(content: String) {
-            if (config.think) emit(OutboundMessage.Think(msg.conversationId, msg.userId, content))
+            if (config.think) emit(OutboundMessage.Think(msg.conversationId, msg.userId, msg.groupId, content))
         }
 
         // 模式决定是否传工具（如 CHAT 不传）。
@@ -116,7 +120,7 @@ abstract class Agent(
                 log("step ${step + 1}: no tool calls, finishing")
                 if (config.mode.emitAgentText) {
                     assistant.content?.takeIf { it.isNotBlank() }?.let {
-                        emit(OutboundMessage.AgentReply(msg.conversationId, msg.userId, it))
+                        emit(OutboundMessage.AgentReply(msg.conversationId, msg.userId, msg.groupId, it))
                     }
                 }
                 if (clearContextAfter) {
@@ -129,6 +133,7 @@ abstract class Agent(
             // 中间过程才算 think：模型的思考文本 + 即将调用的工具 (最后一轮的 content 是最终回答，不算)。
             assistant.content?.takeIf { it.isNotBlank() }?.let { logThink(it) }
 
+            var endTurn = false
             for (call in calls) {
                 if (call !is ToolCall.Function) continue
                 val toolName = call.function.name
@@ -142,8 +147,15 @@ abstract class Agent(
                     content = result.toAgent,
                 )
                 result.userReply?.takeIf { it.isNotBlank() }?.let {
-                    emit(OutboundMessage.ToolReply(msg.conversationId, msg.userId, it, toolName))
+                    emit(OutboundMessage.ToolReply(msg.conversationId, msg.userId, msg.groupId, it, toolName))
                 }
+                if (result.endTurn) endTurn = true
+            }
+            compactOldToolRounds(history)
+            if (endTurn) {
+                log("step ${step + 1}: endTurn signaled, finishing turn")
+                if (clearContextAfter) store.clear(msg.conversationId)
+                return
             }
         }
         // 步数耗尽：不再给工具，让模型基于已有信息整理现状并向用户汇报。
@@ -164,7 +176,7 @@ abstract class Agent(
         ).choices.first().message
         history += wrapUp
         wrapUp.content?.takeIf { it.isNotBlank() }?.let {
-            emit(OutboundMessage.AgentReply(msg.conversationId, msg.userId, it))
+            emit(OutboundMessage.AgentReply(msg.conversationId, msg.userId, msg.groupId, it))
         }
         if (clearContextAfter) store.clear(msg.conversationId)
     }
@@ -179,9 +191,30 @@ abstract class Agent(
         if (!authorizer.allow(msg.userId, toolName)) {
             return ToolResult(toAgent = "Error: permission denied for user '${msg.userId}' on tool '$toolName'.")
         }
-        val ctx = ToolContext(msg.userId, msg.conversationId, store, tools)
+        val ctx = ToolContext(msg.userId, msg.conversationId, msg.groupId, store, tools, buffer)
         return runCatching { tool.execute(ctx, args) }
             .getOrElse { ToolResult(toAgent = "Error executing '$toolName': ${it.message}") }
+    }
+
+    private fun compactOldToolRounds(history: MutableList<ChatMessage>) {
+        val roundStarts = history.withIndex()
+            .filter { (_, m) -> m.role == ChatRole.Assistant && !m.toolCalls.isNullOrEmpty() }
+            .map { it.index }
+        if (roundStarts.size <= KEEP_RECENT_TOOL_ROUNDS) return
+        val cutoff = roundStarts[roundStarts.size - KEEP_RECENT_TOOL_ROUNDS]
+        for (i in 0 until cutoff) {
+            val m = history[i]
+            if (m.role != ChatRole.Tool) continue
+            val original = m.content ?: continue
+            if (original.startsWith(SUMMARY_PREFIX)) continue
+            val status = if (original.trimStart().startsWith("Error")) "failed" else "ok"
+            history[i] = ChatMessage(
+                role = ChatRole.Tool,
+                toolCallId = m.toolCallId,
+                name = m.name,
+                content = "$SUMMARY_PREFIX${m.name ?: "tool"}: $status",
+            )
+        }
     }
 
     private fun ensureSystemPrompt(history: MutableList<ChatMessage>) {
@@ -203,5 +236,10 @@ abstract class Agent(
                 parameters = Parameters.fromJsonString(Json.encodeToString(kotlinx.serialization.json.JsonObject.serializer(), t.parameters)),
             ),
         )
+    }
+
+    private companion object {
+        const val KEEP_RECENT_TOOL_ROUNDS = 2
+        const val SUMMARY_PREFIX = "[summary] "
     }
 }

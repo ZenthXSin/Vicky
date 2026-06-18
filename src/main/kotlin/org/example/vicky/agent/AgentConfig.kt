@@ -20,6 +20,8 @@ data class AgentConfig(
     val apiKey: String,
     val baseUrl: String? = null,
     val maxSteps: Int = 8,
+    val maxMemoryRounds: Int = 50,
+    val maxContextLength: Int = 0,
     val mode: AgentMode = AgentMode.SILENT,
     val temperature: Double? = null,
     val agentMd: String = "You are a helpful assistant.",
