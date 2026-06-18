@@ -1,4 +1,4 @@
-package org.example.vicky.agent
+﻿package org.example.vicky.agent
 
 import com.aallam.openai.api.model.ModelId
 
@@ -9,6 +9,8 @@ import com.aallam.openai.api.model.ModelId
  * @property apiKey API key (可空仅用于 mock 测试)。
  * @property baseUrl 兼容 OpenAI 协议的自定义 host，例如 "https://api.deepseek.com/v1/"。null = 官方。
  * @property maxSteps 单次 receive 最多走多少轮 LLM 推理，防死循环。
+ * @property maxMemoryRounds 最多保留多少轮用户消息（1轮 = user + assistant），超过则截断旧消息。0 = 不限制。
+ * @property maxContextLength 上下文总字符数上限，超过则触发 LLM 压缩生成摘要。0 = 不限制。
  * @property mode 模式 1 (SILENT) 或模式 2 (VERBOSE)。
  * @property temperature 透传给 chat completion。
  * @property agentMd 基础系统提示文本 (人设/指令)，直接内联，不再读文件。

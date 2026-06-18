@@ -10,6 +10,7 @@ import com.aallam.openai.api.chat.ToolType
 import com.aallam.openai.client.OpenAI
 import kotlinx.serialization.json.Json
 import org.example.vicky.context.ContextBuilder
+import org.example.vicky.context.ContextCompactor
 import org.example.vicky.context.ConversationStore
 import org.example.vicky.io.InboundMessage
 import org.example.vicky.io.MessageSink
@@ -52,9 +53,13 @@ abstract class Agent(
     protected val store: ConversationStore = ConversationStore(),
 ) {
     val tools: ToolRegistry = ToolRegistry()
+    private val compactor = ContextCompactor(config, openAi)
 
     init {
-        if (config.builtinTools) BuiltinTools.all().forEach { tools.register(it) }
+        if (config.builtinTools) {
+            val baseDir = java.io.File(System.getProperty("user.dir"))
+            BuiltinTools.all(baseDir).forEach { tools.register(it) }
+        }
     }
 
     /** 子类提供：消息出口。 */
@@ -104,6 +109,8 @@ abstract class Agent(
         // 模式决定是否传工具（如 CHAT 不传）。
         val oaiTools = if (config.mode.toolsEnabled) buildOpenAiTools() else emptyList()
 
+        compactor.ensureContextBudget(history)
+
         repeat(config.maxSteps) { step ->
             log("step ${step + 1}/${config.maxSteps} -> requesting completion (${history.size} msgs)")
             val request = ChatCompletionRequest(
@@ -152,6 +159,7 @@ abstract class Agent(
                 if (result.endTurn) endTurn = true
             }
             compactOldToolRounds(history)
+            compactor.ensureContextBudget(history)
             if (endTurn) {
                 log("step ${step + 1}: endTurn signaled, finishing turn")
                 if (clearContextAfter) store.clear(msg.conversationId)

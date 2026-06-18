@@ -28,8 +28,11 @@ class ClearContextTool : Tool() {
 
 /** 框架内置工具集合。Agent 在 [config.builtinTools] 打开时自动注册。 */
 object BuiltinTools {
-    fun all(): List<Tool> = listOf(
+    fun all(baseDir: java.io.File = java.io.File(System.getProperty("user.dir"))): List<Tool> = listOf(
         ClearContextTool(),
         GithubTool(),
+        FileReadTool(baseDir),
+        FileWriteTool(baseDir),
+        FileListTool(baseDir),
     )
 }

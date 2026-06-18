@@ -53,7 +53,7 @@ class OneBot(
         agent.registerTool(GroupMembersTool(bot!!))
         agent.registerTool(UserProfileTool(bot!!))
         // Register mirai L2 tools (write operations, admin-gated)
-        listOf("send_message", "group_manage", "friend_manage", "group_quit", "group_announcements")
+        listOf("send_message", "group_manage", "friend_manage", "group_quit", "group_announcements", "file_write")
             .forEach { adminToolList.add(it) }
         agent.registerTool(SendMessageTool(bot!!))
         agent.registerTool(GroupManageTool(bot!!))
