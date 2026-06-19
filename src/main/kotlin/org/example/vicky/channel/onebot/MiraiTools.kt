@@ -569,7 +569,7 @@ class AtTool(bot: Bot) : MiraiTool(bot) {
             }
             putJsonObject("endTurn") {
                 put("type", "boolean")
-                put("description", "If true, end the bot's turn after sending the @mention. No further text will be generated. Default true.")
+                put("description", "If true, end the bot's turn after sending the @mention. No further text will be generated. Default false.")
             }
         }
         put("required", buildJsonArray { add(JsonPrimitive("groupId")); add(JsonPrimitive("targetId")) })
@@ -586,7 +586,7 @@ class AtTool(bot: Bot) : MiraiTool(bot) {
         val text = args["text"]?.jsonPrimitive?.content ?: ""
         val msg = At(tid) + if (text.isNotBlank()) " $text" else ""
         group.sendMessage(msg)
-        val endTurn = args["endTurn"]?.jsonPrimitive?.boolean ?: true
+        val endTurn = args["endTurn"]?.jsonPrimitive?.boolean ?: false
         return ToolResult(toAgent = "Sent @${member.nameCardOrNick}($tid) in group $gid.", userReply = null, endTurn = endTurn)
     }
 }

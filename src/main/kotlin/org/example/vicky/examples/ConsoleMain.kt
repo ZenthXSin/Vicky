@@ -122,6 +122,16 @@ fun main() = runBlocking {
     oneBot.connect()
 
     oneBotConfig.adminList.forEach { oneBot.adminList.add(it) }
+    oneBotConfig.groupWhitelist.forEach { oneBot.groupWhitelist.add(it) }
+    oneBotConfig.userWhitelist.forEach { oneBot.userWhitelist.add(it) }
+
+    var currentConfig = result.config
+    oneBot.onGroupWhitelistChanged = { latest ->
+        currentConfig = currentConfig.copy(
+            oneBot = currentConfig.oneBot.copy(groupWhitelist = latest.toList())
+        )
+        ConfigManager.save(currentConfig)
+    }
 
     val agent = oneBot.agent
 

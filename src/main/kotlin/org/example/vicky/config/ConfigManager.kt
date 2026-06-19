@@ -78,6 +78,8 @@ data class OneBotConfigData(
     val url: String = "ws://127.0.0.1:3001",
     val token: String = "",
     val adminList: List<String> = listOf("488254306", "2703872748"),
+    val groupWhitelist: List<String> = emptyList(),
+    val userWhitelist: List<String> = emptyList(),
 )
 
 object ConfigManager {
@@ -124,6 +126,14 @@ object ConfigManager {
         }
 
         return LoadResult(configData, agentMdContent, firstRun = false)
+    }
+
+    fun save(config: ConfigData) {
+        val configFile = File(getConfigDir(), "config.json")
+        configFile.writeText(
+            json.encodeToString(ConfigData.serializer(), config),
+            Charsets.UTF_8,
+        )
     }
 
     private fun generateDefaults(configDir: File): Pair<ConfigData, String> {

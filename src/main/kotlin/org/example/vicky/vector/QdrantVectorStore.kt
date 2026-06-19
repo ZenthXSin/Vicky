@@ -46,6 +46,11 @@ class QdrantVectorStore(
 
     override suspend fun upsert(collection: String, records: List<VectorRecord>) {
         if (records.isEmpty()) return
+        // 分批发送，避免单次请求超出 Qdrant 32MB 限制
+        records.chunked(100).forEach { batch -> upsertBatch(collection, batch) }
+    }
+
+    private suspend fun upsertBatch(collection: String, records: List<VectorRecord>) {
         withContext(Dispatchers.IO) {
             val points = records.map { record ->
                 buildJsonObject {
@@ -62,7 +67,6 @@ class QdrantVectorStore(
                 put("points", kotlinx.serialization.json.JsonArray(points))
             }
 
-            // 带重试的 upsert
             val maxRetries = 3
             var lastException: Exception? = null
             repeat(maxRetries) { attempt ->
@@ -77,7 +81,7 @@ class QdrantVectorStore(
                     }
                     val errorMsg = response.body<String>()
                     if (attempt < maxRetries - 1) {
-                        val delayMs = (attempt + 1) * 1000L  // 1s, 2s, 3s
+                        val delayMs = (attempt + 1) * 1000L
                         println("[Vicky] Qdrant upsert 失败 (${response.status})，${delayMs}ms 后重试 (${attempt + 1}/$maxRetries)...")
                         delay(delayMs)
                     } else {
