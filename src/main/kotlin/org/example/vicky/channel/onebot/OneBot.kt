@@ -63,7 +63,7 @@ class OneBot(
         listOf(
             "send_message", "group_manage", "friend_manage", "group_quit", "group_announcements",
             "file_write", "send_image", "send_video", "recall_message", "set_name_card",
-            "essence_message", "group_files"
+            "essence_message", "group_files", "group_whitelist_add"
         ).forEach { adminToolList.add(it) }
         agent.registerTool(SendMessageTool(bot!!))
         agent.registerTool(GroupManageTool(bot!!))
@@ -84,6 +84,9 @@ class OneBot(
         agent.registerTool(EssenceMessageTool(bot!!, messageSourceCache))
         agent.registerTool(RoamingMessagesTool(bot!!))
         agent.registerTool(GroupFilesTool(bot!!))
+        agent.registerTool(GroupWhitelistAddTool(groupWhitelist) {
+            onGroupWhitelistChanged?.invoke(groupWhitelist.toSet())
+        })
         registerListeners()
         return true
     }
@@ -162,21 +165,7 @@ class OneBot(
         // 监听器B: 群消息 → 检测 @Bot → 触发 Agent
         channel.subscribeAlways<GroupMessageEvent> {
             if (!isBotMentioned(message, b)) return@subscribeAlways
-
-            // 管理员指令：@Bot /加入白名单 → 把本群加入白名单并回写配置
-            val text = message.content.trim().removePrefix("/").trim()
-            if (text == "加入白名单" && sender.id.toString() in adminList) {
-                val gid = group.id.toString()
-                if (groupWhitelist.add(gid)) {
-                    onGroupWhitelistChanged?.invoke(groupWhitelist.toSet())
-                    group.sendMessage("已加入白名单：$gid")
-                } else {
-                    group.sendMessage("已在白名单中")
-                }
-                return@subscribeAlways
-            }
-
-            if (group.id.toString() !in groupWhitelist) return@subscribeAlways
+            if (group.id.toString() !in groupWhitelist && sender.id.toString() !in adminList) return@subscribeAlways
 
             val inbound = buildInboundFromBuffer(
                 conversationId = group.id.toString(),
@@ -186,12 +175,13 @@ class OneBot(
                 currentText = message.content,
                 senderName = sender.nameCardOrNick,
             )
+            println("[→Agent] $inbound")
             agent.receive(inbound)
         }
 
         // 监听器C: 好友消息 → 全部触发 Agent
         channel.subscribeAlways<FriendMessageEvent> {
-            if (sender.id.toString() !in userWhitelist) return@subscribeAlways
+            if (sender.id.toString() !in userWhitelist && sender.id.toString() !in adminList) return@subscribeAlways
             val inbound = buildInboundFromBuffer(
                 conversationId = sender.id.toString(),
                 userId = sender.id.toString(),
@@ -200,12 +190,13 @@ class OneBot(
                 currentText = message.content,
                 senderName = sender.nick,
             )
+            println("[→Agent] $inbound")
             agent.receive(inbound)
         }
 
         // 监听器D: 陌生人/临时会话消息 → 全部触发 Agent
         channel.subscribeAlways<StrangerMessageEvent> {
-            if (sender.id.toString() !in userWhitelist) return@subscribeAlways
+            if (sender.id.toString() !in userWhitelist && sender.id.toString() !in adminList) return@subscribeAlways
             val inbound = buildInboundFromBuffer(
                 conversationId = sender.id.toString(),
                 userId = sender.id.toString(),
@@ -214,6 +205,7 @@ class OneBot(
                 currentText = message.content,
                 senderName = sender.nick,
             )
+            println("[→Agent] $inbound")
             agent.receive(inbound)
         }
     }

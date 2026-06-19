@@ -53,6 +53,7 @@ object BuiltinTools {
         }
         if (fileIndexService != null) {
             add(FileSearchTool(fileIndexService))
+            add(FileIndexTool(fileIndexService))
         }
     }
 }
