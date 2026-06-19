@@ -132,9 +132,34 @@ src/main/kotlin/org/example/vicky/
 
 ## 快速开始
 
-### 1. 依赖
+### 1. 运行
 
-已在 `build.gradle.kts` 配好（openai-client 4.1.0 + ktor-okhttp + coroutines + serialization + DJL + Qdrant）。
+**方式一：直接运行 JAR（推荐）**
+
+构建 Shadow JAR：
+```bash
+./gradlew shadowJar
+```
+
+运行：
+```bash
+java -jar build/libs/Vicky-1.0-SNAPSHOT.jar
+```
+
+首次运行会自动在 `config/` 目录生成默认配置文件 `config.json` 和系统提示词 `AGENT.md`。修改配置后重新运行即可。
+
+**方式二：Gradle 直接运行**
+
+```bash
+./gradlew run
+```
+
+**方式三：作为库引用**
+
+在 `build.gradle.kts` 中添加依赖（发布到 GitHub Packages 后）：
+```kotlin
+implementation("org.example.vicky:vicky:1.0-SNAPSHOT")
+```
 
 ### 2. 写一个 Agent 子类
 
