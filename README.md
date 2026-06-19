@@ -134,7 +134,7 @@ src/main/kotlin/org/example/vicky/
 
 ### 1. 运行
 
-**方式一：直接运行 JAR（推荐）**
+### 1. 直接运行 JAR（推荐）**
 ```bash
 java -jar 从releases获取的包.jar
 ```
@@ -432,6 +432,65 @@ val agent = MyAgent(AgentConfig(model = ..., apiKey = ..., mode = ReviewMode))
                     │  └──────────┘  └─────────────────┘  │
                     └─────────────────────────────────────┘
 ```
+
+## OneBot 通道（QQ 机器人）
+
+Vicky 内置 OneBot 通道，可直接连接 QQ 机器人（通过 [NapCat](https://github.com/NapNeko/NapCatQQ)、[Lagrange](https://github.com/LagrangeDev/Lagrange.Core) 等 OneBot 协议实现）。
+
+### 配置
+
+在 `config/config.json` 中配置：
+
+```json
+{
+    "oneBot": {
+        "url": "ws://127.0.0.1:3001",
+        "token": "",
+        "adminList": ["488254306"]
+    }
+}
+```
+
+| 参数 | 说明 |
+|------|------|
+| `url` | OneBot WebSocket 地址 |
+| `token` | 认证 token |
+| `adminList` | 管理员 QQ 号列表（可使用受限工具） |
+
+### 功能
+
+- **私聊**：所有私聊消息触发 Agent
+- **群聊**：@机器人 时触发 Agent
+- **消息缓冲**：自动缓存近期群聊消息，Agent 可通过工具获取上下文
+- **管理员权限**：`adminList` 中的用户可使用受限工具
+
+### Mirai 工具集
+
+内置以下 Mirai 工具（需管理员权限）：
+
+| 工具 | 说明 |
+|------|------|
+| `bot_info` | 获取机器人信息 |
+| `contacts` | 获取联系人列表 |
+| `group_info` | 获取群信息 |
+| `group_members` | 获取群成员列表 |
+| `user_profile` | 获取用户资料 |
+| `send_message` | 发送消息 |
+| `group_manage` | 群管理操作 |
+| `friend_manage` | 好友管理操作 |
+| `group_quit` | 退出群聊 |
+| `group_announcements` | 群公告管理 |
+| `at` | @某人 |
+| `send_image` | 发送图片 |
+| `send_video` | 发送视频 |
+| `friend_request` | 好友请求处理 |
+| `group_invite` | 群邀请处理 |
+| `member_join_request` | 加群请求处理 |
+| `set_name_card` | 设置群名片 |
+| `roaming_messages` | 漫游消息 |
+| `group_files` | 群文件管理 |
+| `get_messages` | 获取消息历史 |
+| `recall` | 撤回消息 |
 
 ## 测试
 
