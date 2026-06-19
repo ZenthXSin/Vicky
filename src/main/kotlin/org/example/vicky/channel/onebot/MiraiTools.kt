@@ -279,10 +279,7 @@ class SendMessageTool(bot: Bot) : MiraiTool(bot) {
 class GroupManageTool(bot: Bot) : MiraiTool(bot) {
     override val name = "group_manage"
     override val description =
-        "Manage group members and settings. Supported actions: " +
-            "'mute' (mute a member, durationSeconds), 'unmute', 'kick' (with optional message and block), " +
-            "'set_admin' (grant/remove admin, needs OWNER), 'rename' (change group name), " +
-            "'mute_all' (toggle mute-all), 'title' (set member special title)."
+        "Manage group: mute/kick/admin/rename/mute-all/title."
     override val parameters: JsonObject = buildJsonObject {
         put("type", "object")
         putJsonObject("properties") {
@@ -470,10 +467,7 @@ class GroupQuitTool(bot: Bot) : MiraiTool(bot) {
 class GroupAnnouncementsTool(bot: Bot) : MiraiTool(bot) {
     override val name = "group_announcements"
     override val description =
-        "Manage group announcements. Actions: " +
-            "'list' (list all announcements), " +
-            "'publish' (post a new announcement with optional pinned/requireConfirmation flags), " +
-            "'delete' (delete by fid)."
+        "Manage group announcements: list/publish/delete."
     override val parameters: JsonObject = buildJsonObject {
         put("type", "object")
         putJsonObject("properties") {
@@ -1278,12 +1272,7 @@ class RoamingMessagesTool(bot: Bot) : MiraiTool(bot) {
 class GroupFilesTool(bot: Bot) : MiraiTool(bot) {
     override val name = "group_files"
     override val description =
-        "Manage group files. Actions: " +
-            "'list' (list files in root or specified folder), " +
-            "'info' (get file details by id), " +
-            "'delete' (delete file by id), " +
-            "'rename' (rename file by id), " +
-            "'url' (get download URL by id)."
+        "Manage group files: list/info/delete/rename/url."
     override val parameters: JsonObject = buildJsonObject {
         put("type", "object")
         putJsonObject("properties") {

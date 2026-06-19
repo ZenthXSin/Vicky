@@ -19,9 +19,7 @@ class FileSearchTool(
 ) : Tool() {
     override val name = "file_search"
     override val description =
-        "Search indexed files by content/semantic similarity. " +
-            "Use this when the user asks about code location, content topics, or file discovery. " +
-            "Requires file indexing to be enabled. Returns matching file paths and content snippets."
+        "Semantic search indexed files by content."
 
     override val parameters: JsonObject = buildJsonObject {
         put("type", "object")

@@ -62,31 +62,12 @@ data class MemoryConfigData(
 )
 
 /**
- * 语义模型配置。内置 / 外置互斥：
- * - `type = "builtin"`：使用 [builtin] 段，进程内本地推理。
- * - `type = "external"`：使用 [external] 段，OpenAI 协议远程端点。
+ * 语义模型配置。启用后使用 OpenAI 协议兼容端点。
  * `enabled = false` 时整段忽略，AgentConfig.embedding 为 null。
  */
 @Serializable
 data class EmbeddingConfigData(
     val enabled: Boolean = false,
-    val type: String = "builtin",
-    val builtin: BuiltinEmbeddingData = BuiltinEmbeddingData(),
-    val external: ExternalEmbeddingData = ExternalEmbeddingData(),
-)
-
-@Serializable
-data class BuiltinEmbeddingData(
-    val model: String = "sentence-transformers/all-MiniLM-L6-v2",
-    /** 本地模型目录（非空时优先离线加载，不走网络）。 */
-    val modelPath: String = "",
-    /** HuggingFace 镜像端点（仅 modelPath 为空时生效），如 "https://hf-mirror.com"。 */
-    val endpoint: String = "",
-    val proxy: String = "",
-)
-
-@Serializable
-data class ExternalEmbeddingData(
     val baseUrl: String = "",
     val apiKey: String = "",
     val model: String = "",
@@ -157,7 +138,7 @@ object ConfigManager {
             model = "deepseek-v4-flash",
             apiKey = "sk-Nhxs7MO3HDspptIICNmgobNdmeSc4RcIM6Aa4FLxvqgxeM6S",
             baseUrl = "http://192.168.0.108:3000/v1/",
-            maxSteps = 60,
+            maxSteps = 15,
             maxMemoryRounds = 10,
             maxContextLength = 16000,
             mode = "VERBOSE",
@@ -231,35 +212,16 @@ object ConfigManager {
     }
 
     /**
-     * 把 JSON 层的 [EmbeddingConfigData] 转成 sealed [EmbeddingConfig]。
+     * 把 JSON 层的 [EmbeddingConfigData] 转成 [EmbeddingConfig]。
      * - `enabled = false` -> null
-     * - `type = "builtin"`  -> [EmbeddingConfig.Builtin]
-     * - `type = "external"` -> [EmbeddingConfig.External]；baseUrl/apiKey/model 任一为空抛异常
-     * - 其他 type 抛异常
+     * - baseUrl/model 任一为空抛异常
      */
     private fun toEmbeddingConfig(data: EmbeddingConfigData): EmbeddingConfig? {
         if (!data.enabled) return null
-        return when (data.type.lowercase()) {
-            "builtin" -> {
-                require(data.builtin.model.isNotBlank()) {
-                    "内置语义模型需配置 builtin.model"
-                }
-                EmbeddingConfig.Builtin(
-                    model = data.builtin.model,
-                    modelPath = data.builtin.modelPath,
-                    endpoint = data.builtin.endpoint,
-                    proxy = data.builtin.proxy,
-                )
-            }
-            "external" -> {
-                val e = data.external
-                require(e.baseUrl.isNotBlank() && e.model.isNotBlank()) {
-                    "外置语义模型需配置 baseUrl/model"
-                }
-                EmbeddingConfig.External(baseUrl = e.baseUrl, apiKey = e.apiKey, model = e.model)
-            }
-            else -> error("未知的 embedding.type: '${data.type}'（仅支持 builtin / external）")
+        require(data.baseUrl.isNotBlank() && data.model.isNotBlank()) {
+            "语义模型需配置 baseUrl/model"
         }
+        return EmbeddingConfig(baseUrl = data.baseUrl, apiKey = data.apiKey, model = data.model)
     }
 
     private fun deriveFileName(agentMdContent: String): String {

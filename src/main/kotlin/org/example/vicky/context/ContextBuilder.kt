@@ -26,13 +26,9 @@ class ContextBuilder(
         append("\n\n# Output rules\n")
         append(mode.instructions)
 
-        // 模式禁用工具时（如 CHAT），不拼接工具列表。
         if (mode.toolsEnabled && !tools.isEmpty()) {
             append("\n\n# Tool Usage Guide\n")
             append(TOOL_USAGE_GUIDE)
-
-            append("\n\n# Available tools\n")
-            append(tools.snapshot().joinToString("\n") { "- ${it.name}: ${it.description}" })
         }
     }
 

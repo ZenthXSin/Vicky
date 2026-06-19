@@ -15,6 +15,7 @@ import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -60,14 +61,38 @@ class QdrantVectorStore(
             val body = buildJsonObject {
                 put("points", kotlinx.serialization.json.JsonArray(points))
             }
-            val response: HttpResponse = client.put("$baseUrl/collections/$collection/points") {
-                contentType(ContentType.Application.Json)
-                setBody(body.toString())
+
+            // 带重试的 upsert
+            val maxRetries = 3
+            var lastException: Exception? = null
+            repeat(maxRetries) { attempt ->
+                try {
+                    val response: HttpResponse = client.put("$baseUrl/collections/$collection/points") {
+                        contentType(ContentType.Application.Json)
+                        setBody(body.toString())
+                    }
+                    response.body<String>()  // 消费响应体以释放连接
+                    if (response.status.isSuccess()) {
+                        return@withContext
+                    }
+                    val errorMsg = response.body<String>()
+                    if (attempt < maxRetries - 1) {
+                        val delayMs = (attempt + 1) * 1000L  // 1s, 2s, 3s
+                        println("[Vicky] Qdrant upsert 失败 (${response.status})，${delayMs}ms 后重试 (${attempt + 1}/$maxRetries)...")
+                        delay(delayMs)
+                    } else {
+                        throw RuntimeException("Qdrant upsert failed after $maxRetries attempts: ${response.status} - $errorMsg")
+                    }
+                } catch (e: Exception) {
+                    lastException = e
+                    if (attempt < maxRetries - 1) {
+                        val delayMs = (attempt + 1) * 1000L
+                        println("[Vicky] Qdrant upsert 异常: ${e.message}，${delayMs}ms 后重试 (${attempt + 1}/$maxRetries)...")
+                        delay(delayMs)
+                    }
+                }
             }
-            response.body<String>()  // 消费响应体以释放连接
-            if (!response.status.isSuccess()) {
-                throw RuntimeException("Qdrant upsert failed: ${response.status}")
-            }
+            throw lastException ?: RuntimeException("Qdrant upsert failed after $maxRetries attempts")
         }
     }
 

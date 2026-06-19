@@ -34,10 +34,7 @@ private fun safePath(baseDir: File, path: String): File? {
 class FileReadTool(private val baseDir: File) : Tool() {
     override val name = "file_read"
     override val description =
-        "Read a text file's content. Pass a relative path from the project root. " +
-            "Use after file_search to read found files, or after file_list to read specific files. " +
-            "Returns file content (truncated at 20000 chars). " +
-            "Binary files and paths outside the project directory are rejected."
+        "Read a text file by relative path. Truncated at 20K chars."
     override val parameters: JsonObject = buildJsonObject {
         put("type", "object")
         putJsonObject("properties") {
@@ -86,9 +83,7 @@ class FileReadTool(private val baseDir: File) : Tool() {
 class FileWriteTool(private val baseDir: File) : Tool() {
     override val name = "file_write"
     override val description =
-        "Write content to a text file. Creates parent directories if needed. " +
-            "Overwrites the file by default; pass append=true to append. " +
-            "Paths outside the project directory are rejected."
+        "Write text to a file. Creates parent dirs. Append mode available."
     override val parameters: JsonObject = buildJsonObject {
         put("type", "object")
         putJsonObject("properties") {
@@ -150,9 +145,7 @@ class FileWriteTool(private val baseDir: File) : Tool() {
 class FileListTool(private val baseDir: File) : Tool() {
     override val name = "file_list"
     override val description =
-        "List contents of a directory. Use when you know the directory path and want to browse its structure. " +
-            "For content-based searching, use file_search instead. " +
-            "Shows subdirectories and files with sizes. Paths outside the project directory are rejected."
+        "List directory contents with file sizes."
     override val parameters: JsonObject = buildJsonObject {
         put("type", "object")
         putJsonObject("properties") {

@@ -19,7 +19,6 @@ import org.example.vicky.file.FileIndexService
 import org.example.vicky.io.InboundMessage
 import org.example.vicky.io.MessageSink
 import org.example.vicky.io.OutboundMessage
-import org.example.vicky.llm.BuiltinEmbeddingClient
 import org.example.vicky.llm.EmbeddingClientFactory
 import org.example.vicky.llm.OpenAiClientFactory
 import org.example.vicky.memory.Distiller
@@ -61,10 +60,6 @@ abstract class Agent(
     }
 
     private val embeddingClient: org.example.vicky.llm.EmbeddingClient? = run {
-        // 配置代理（必须在创建 embedding 客户端之前）
-        if (config.embedding is EmbeddingConfig.Builtin && config.embedding.proxy.isNotBlank()) {
-            org.example.vicky.llm.BuiltinEmbeddingClient.configureProxy(config.embedding.proxy)
-        }
         config.embedding?.let { EmbeddingClientFactory.create(it) }
     }
 
@@ -161,15 +156,20 @@ abstract class Agent(
             try {
                 val memories = memoryStore.recall(msg.content, msg.userId, config.memoryTopK)
                 if (memories.isNotEmpty()) {
-                    val memoryText = buildString {
-                        appendLine("# Memory")
-                        appendLine("Recalled from long-term memory (relevance ranked):")
-                        appendLine()
-                        memories.forEach { memory ->
-                            appendLine("- [${memory.source}] ${memory.content}")
-                        }
+                    var budget = config.memoryTokenBudget
+                    val memSb = StringBuilder()
+                    memSb.appendLine("# Memory")
+                    for (memory in memories) {
+                        if (budget <= 0) break
+                        val line = "- [${memory.source}] ${memory.content}"
+                        val truncated = if (line.length > budget) line.take(budget) + "…" else line
+                        memSb.appendLine(truncated)
+                        budget -= truncated.length
                     }
-                    history.add(1, ChatMessage(role = ChatRole.System, content = memoryText))
+                    val memoryText = memSb.toString().trimEnd()
+                    if (memoryText.contains("[")) {
+                        history.add(1, ChatMessage(role = ChatRole.System, content = memoryText))
+                    }
                 }
             } catch (e: Exception) {
                 println("[Vicky] 记忆读取失败: ${e.message}")

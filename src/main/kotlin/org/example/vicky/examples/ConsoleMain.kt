@@ -105,12 +105,6 @@ private class PingTool : Tool() {
 fun main() = runBlocking {
     System.setOut(java.io.PrintStream(System.out, true, Charsets.UTF_8))
 
-    // 先加载配置以获取代理设置
-    val tempResult = ConfigManager.loadOrCreate()
-    org.example.vicky.llm.BuiltinEmbeddingClient.configureProxy(
-        tempResult.config.embedding.builtin.proxy
-    )
-
     val result = ConfigManager.loadOrCreate()
     if (result.firstRun) {
         println("首次运行，已生成配置文件: ${ConfigManager.getConfigDir().absolutePath}")

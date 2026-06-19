@@ -16,7 +16,7 @@ import kotlin.time.Duration.Companion.seconds
  *
  * 与主 LLM 的 [OpenAiClientFactory] 解耦——baseUrl/apiKey 各自配置，互不污染。
  */
-class OpenAiEmbeddingClient(private val config: EmbeddingConfig.External) : EmbeddingClient {
+class OpenAiEmbeddingClient(private val config: EmbeddingConfig) : EmbeddingClient {
 
     @Volatile
     override var dimension: Int = -1
