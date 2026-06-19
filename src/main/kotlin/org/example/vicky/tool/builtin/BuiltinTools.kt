@@ -3,6 +3,9 @@ package org.example.vicky.tool.builtin
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import org.example.vicky.file.FileIndexService
+import org.example.vicky.memory.DistillationScheduler
+import org.example.vicky.memory.MemoryStore
 import org.example.vicky.tool.Tool
 import org.example.vicky.tool.ToolContext
 import org.example.vicky.tool.ToolResult
@@ -28,11 +31,27 @@ class ClearContextTool : Tool() {
 
 /** 框架内置工具集合。Agent 在 [config.builtinTools] 打开时自动注册。 */
 object BuiltinTools {
-    fun all(baseDir: java.io.File = java.io.File(System.getProperty("user.dir"))): List<Tool> = listOf(
-        ClearContextTool(),
-        GithubTool(),
-        FileReadTool(baseDir),
-        FileWriteTool(baseDir),
-        FileListTool(baseDir),
-    )
+    fun all(
+        baseDir: java.io.File = java.io.File(System.getProperty("user.dir")),
+        memoryStore: MemoryStore? = null,
+        fileIndexService: FileIndexService? = null,
+        distillationScheduler: DistillationScheduler? = null,
+    ): List<Tool> = buildList {
+        add(ClearContextTool())
+        add(GithubTool())
+        add(FileReadTool(baseDir))
+        add(FileWriteTool(baseDir))
+        add(FileListTool(baseDir))
+
+        if (memoryStore != null) {
+            add(MemoryStoreTool(memoryStore))
+            add(MemorySearchTool(memoryStore))
+        }
+        if (distillationScheduler != null) {
+            add(MemoryDistillTool(distillationScheduler))
+        }
+        if (fileIndexService != null) {
+            add(FileSearchTool(fileIndexService))
+        }
+    }
 }

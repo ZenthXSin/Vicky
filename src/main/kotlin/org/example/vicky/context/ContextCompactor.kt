@@ -1,4 +1,4 @@
-﻿package org.example.vicky.context
+package org.example.vicky.context
 
 import com.aallam.openai.api.chat.ChatCompletionRequest
 import com.aallam.openai.api.chat.ChatMessage
@@ -19,7 +19,7 @@ class ContextCompactor(
     private val openAi: OpenAI,
 ) {
     companion object {
-        private const val CHARS_PER_TOKEN = 4
+        private const val CHARS_PER_TOKEN = 3
         private const val KEEP_RECENT_MESSAGES = 4
         private const val SUMMARY_MARKER = "[context-summary]"
 

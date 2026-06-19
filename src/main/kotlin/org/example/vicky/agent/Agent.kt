@@ -8,43 +8,36 @@ import com.aallam.openai.api.core.Parameters
 import com.aallam.openai.api.chat.ToolCall
 import com.aallam.openai.api.chat.ToolType
 import com.aallam.openai.client.OpenAI
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import org.example.vicky.context.ContextBuilder
 import org.example.vicky.context.ContextCompactor
 import org.example.vicky.context.ConversationStore
+import org.example.vicky.file.FileIndexService
 import org.example.vicky.io.InboundMessage
 import org.example.vicky.io.MessageSink
 import org.example.vicky.io.OutboundMessage
+import org.example.vicky.llm.BuiltinEmbeddingClient
+import org.example.vicky.llm.EmbeddingClientFactory
 import org.example.vicky.llm.OpenAiClientFactory
+import org.example.vicky.memory.Distiller
+import org.example.vicky.memory.DistillationScheduler
+import org.example.vicky.memory.QdrantMemoryStore
+import org.example.vicky.memory.RawMemory
 import org.example.vicky.tool.Tool
 import org.example.vicky.tool.ToolAuthorizer
 import org.example.vicky.tool.ToolContext
 import org.example.vicky.tool.ToolRegistry
 import org.example.vicky.tool.ToolResult
 import org.example.vicky.tool.builtin.BuiltinTools
+import org.example.vicky.vector.QdrantVectorStore
 import com.aallam.openai.api.chat.Tool as OAITool
 
 /**
  * Agent 抽象基类。子类负责提供消息出口 ([sink]) 与权限策略 ([authorizer])，
  * 并通过 [receive] 把入站消息送进来。
- *
- * 主循环 (每条入站消息独立运行)：
- * ```
- * for step in 0 until maxSteps:
- *   resp = chat.completion(history + tools)
- *   if resp.toolCalls 非空:
- *     for tc in toolCalls:
- *       校验权限 -> 执行工具 -> result
- *       history += assistantToolCall
- *       history += toolMessage(result.toAgent)
- *       result.userReply?.let { sink.emit(ToolReply) }   // 实时输出
- *     if any result.endTurn: return   // 工具发信号，结束本轮思考
- *     continue
- *   else:
- *     if mode == VERBOSE: sink.emit(AgentReply(resp.content))
- *     history += assistantMessage
- *     break
- * ```
  */
 abstract class Agent(
     protected val config: AgentConfig,
@@ -55,10 +48,87 @@ abstract class Agent(
     val tools: ToolRegistry = ToolRegistry()
     private val compactor = ContextCompactor(config, openAi)
 
+    // 向量存储组件（Qdrant 不可用时自动禁用记忆功能）
+    private val vectorStore: QdrantVectorStore? = run {
+        if (config.qdrantHost == null || config.embedding == null) return@run null
+        try {
+            QdrantVectorStore(config.qdrantHost, config.qdrantHttpPort)
+        } catch (e: Exception) {
+            println("[Vicky] Qdrant 连接失败: ${e.message}")
+            println("[Vicky] 记忆功能已禁用")
+            null
+        }
+    }
+
+    private val embeddingClient: org.example.vicky.llm.EmbeddingClient? = run {
+        // 配置代理（必须在创建 embedding 客户端之前）
+        if (config.embedding is EmbeddingConfig.Builtin && config.embedding.proxy.isNotBlank()) {
+            org.example.vicky.llm.BuiltinEmbeddingClient.configureProxy(config.embedding.proxy)
+        }
+        config.embedding?.let { EmbeddingClientFactory.create(it) }
+    }
+
+    private val memoryStore: QdrantMemoryStore? = if (vectorStore != null && embeddingClient != null) {
+        QdrantMemoryStore(vectorStore, embeddingClient, config.memoryCollection, config.memoryRawCollection)
+    } else null
+
+    private val fileIndexService: FileIndexService? = if (vectorStore != null && embeddingClient != null && config.fileIndexEnabled) {
+        FileIndexService(
+            vectorStore, embeddingClient,
+            java.io.File(System.getProperty("user.dir")),
+            config.fileIndexCollection,
+            config.fileIndexChunkSize,
+            config.fileIndexChunkOverlap,
+            config.fileIndexIgnorePatterns,
+            config.fileIndexPaths,
+        )
+    } else null
+
+    private val distiller: Distiller? = if (memoryStore != null && embeddingClient != null) {
+        Distiller(openAi, embeddingClient)
+    } else null
+
+    private val distillationScheduler: DistillationScheduler? = if (distiller != null && config.distillationEnabled) {
+        DistillationScheduler(memoryStore!!, distiller, config.distillationMaxConversations, true)
+    } else null
+
     init {
+        // 打印向量存储初始化状态
+        if (embeddingClient != null) {
+            val dimText = if (embeddingClient.dimension > 0) "维度: ${embeddingClient.dimension}" else "维度: 待首次调用确定"
+            println("[Vicky] 语义模型已加载（$dimText）")
+        }
+        if (vectorStore != null) {
+            println("[Vicky] 向量存储已连接: ${config.qdrantHost}:${config.qdrantHttpPort}")
+        }
+        if (memoryStore != null) {
+            println("[Vicky] 记忆系统已启用（topK: ${config.memoryTopK}, tokenBudget: ${config.memoryTokenBudget}）")
+        }
+
         if (config.builtinTools) {
             val baseDir = java.io.File(System.getProperty("user.dir"))
-            BuiltinTools.all(baseDir).forEach { tools.register(it) }
+            BuiltinTools.all(baseDir, memoryStore, fileIndexService, distillationScheduler).forEach { tools.register(it) }
+        }
+
+        // 启动时后台自动索引文件（不阻塞主线程）
+        if (fileIndexService != null && config.fileIndexAutoIndexOnStart) {
+            println("[Vicky] 开始后台索引文件...")
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    val result = fileIndexService.indexAll { current, success, skipped ->
+                        print("\r[Vicky] 索引中: 已处理 $current 个文件，$success 个已索引，$skipped 个已跳过")
+                    }
+                    println("\n[Vicky] 文件索引完成: ${result.newFiles} 个新增，${result.updatedFiles} 个更新，${result.skippedFiles} 个跳过")
+                } catch (e: Exception) {
+                    println("\n[Vicky] 文件索引失败: ${e.message}")
+                }
+            }
+        }
+
+        // 启动蒸馏调度器
+        if (distillationScheduler != null) {
+            distillationScheduler.start()
+            println("[Vicky] 蒸馏调度器已启动")
         }
     }
 
@@ -77,10 +147,6 @@ abstract class Agent(
 
     /**
      * 入口：外部把收到的消息丢进来。
-     * @param replySink 可选的单次出口，每条面向 user 的输出都会**实时**发一份。
-     *                  与构造时注入的 [sink] 并存，两者都会收到。
-     * @param clearContextAfter 为 true 时，本轮结束 (给出最终回复或耗尽 maxSteps) 后自动清空该会话上下文，
-     *                          实现「单次无状态」请求。下一条消息从空历史开始。
      */
     suspend fun receive(
         msg: InboundMessage,
@@ -89,15 +155,34 @@ abstract class Agent(
     ) {
         val history = store.history(msg.conversationId)
         ensureSystemPrompt(history)
+
+        // 记忆 recall
+        if (memoryStore != null && config.memoryEnabled) {
+            try {
+                val memories = memoryStore.recall(msg.content, msg.userId, config.memoryTopK)
+                if (memories.isNotEmpty()) {
+                    val memoryText = buildString {
+                        appendLine("# Memory")
+                        appendLine("Recalled from long-term memory (relevance ranked):")
+                        appendLine()
+                        memories.forEach { memory ->
+                            appendLine("- [${memory.source}] ${memory.content}")
+                        }
+                    }
+                    history.add(1, ChatMessage(role = ChatRole.System, content = memoryText))
+                }
+            } catch (e: Exception) {
+                println("[Vicky] 记忆读取失败: ${e.message}")
+            }
+        }
+
         history += ChatMessage(role = ChatRole.User, content = msg.content)
 
-        // 同时发到注入的 sink 和（可选）单次 replySink。
         suspend fun emit(out: OutboundMessage) {
             sink.emit(out)
             replySink?.emit(out)
         }
 
-        // 日志走 MessageSink，由外部决定如何呈现/丢弃。
         suspend fun log(message: String) {
             if (config.debug) emit(OutboundMessage.Debug(msg.conversationId, msg.userId, msg.groupId, message))
         }
@@ -106,87 +191,120 @@ abstract class Agent(
             if (config.think) emit(OutboundMessage.Think(msg.conversationId, msg.userId, msg.groupId, content))
         }
 
-        // 模式决定是否传工具（如 CHAT 不传）。
         val oaiTools = if (config.mode.toolsEnabled) buildOpenAiTools() else emptyList()
-
         compactor.ensureContextBudget(history)
 
-        repeat(config.maxSteps) { step ->
-            log("step ${step + 1}/${config.maxSteps} -> requesting completion (${history.size} msgs)")
-            val request = ChatCompletionRequest(
-                model = config.model,
-                messages = history.toList(),
-                tools = oaiTools.takeIf { it.isNotEmpty() },
-                temperature = config.temperature,
-            )
-            val assistant = openAi.chatCompletion(request).choices.first().message
-            history += assistant
+        var assistantReply: String? = null
 
-            val calls = assistant.toolCalls.orEmpty()
-            if (calls.isEmpty()) {
-                log("step ${step + 1}: no tool calls, finishing")
-                if (config.mode.emitAgentText) {
-                    assistant.content?.takeIf { it.isNotBlank() }?.let {
-                        emit(OutboundMessage.AgentReply(msg.conversationId, msg.userId, msg.groupId, it))
-                    }
-                }
-                if (clearContextAfter) {
-                    store.clear(msg.conversationId)
-                    log("cleared context for '${msg.conversationId}' after reply")
-                }
-                return
-            }
-
-            // 中间过程才算 think：模型的思考文本 + 即将调用的工具 (最后一轮的 content 是最终回答，不算)。
-            assistant.content?.takeIf { it.isNotBlank() }?.let { logThink(it) }
-
-            var endTurn = false
-            for (call in calls) {
-                if (call !is ToolCall.Function) continue
-                val toolName = call.function.name
-                logThink("Use Tool: $toolName")
-                log("step ${step + 1}: invoking tool '$toolName'")
-                val result = invokeTool(msg, toolName, call.function.argumentsAsJson())
-                history += ChatMessage(
-                    role = ChatRole.Tool,
-                    toolCallId = call.id,
-                    name = toolName,
-                    content = result.toAgent,
+        try {
+            repeat(config.maxSteps) { step ->
+                log("step ${step + 1}/${config.maxSteps} -> requesting completion (${history.size} msgs)")
+                val request = ChatCompletionRequest(
+                    model = config.model,
+                    messages = history.toList(),
+                    tools = oaiTools.takeIf { it.isNotEmpty() },
+                    temperature = config.temperature,
                 )
-                result.userReply?.takeIf { it.isNotBlank() }?.let {
-                    emit(OutboundMessage.ToolReply(msg.conversationId, msg.userId, msg.groupId, it, toolName))
+                val assistant = openAi.chatCompletion(request).choices.first().message
+                history += assistant
+
+                val calls = assistant.toolCalls.orEmpty()
+                if (calls.isEmpty()) {
+                    log("step ${step + 1}: no tool calls, finishing")
+                    assistantReply = assistant.content
+                    if (config.mode.emitAgentText) {
+                        assistant.content?.takeIf { it.isNotBlank() }?.let {
+                            emit(OutboundMessage.AgentReply(msg.conversationId, msg.userId, msg.groupId, it))
+                        }
+                    }
+                    return
                 }
-                if (result.endTurn) endTurn = true
+
+                assistant.content?.takeIf { it.isNotBlank() }?.let { logThink(it) }
+
+                var endTurn = false
+                for (call in calls) {
+                    if (call !is ToolCall.Function) continue
+                    val toolName = call.function.name
+                    logThink("Use Tool: $toolName")
+                    log("step ${step + 1}: invoking tool '$toolName'")
+                    val result = invokeTool(msg, toolName, call.function.argumentsAsJson())
+                    history += ChatMessage(
+                        role = ChatRole.Tool,
+                        toolCallId = call.id,
+                        name = toolName,
+                        content = result.toAgent,
+                    )
+                    result.userReply?.takeIf { it.isNotBlank() }?.let {
+                        emit(OutboundMessage.ToolReply(msg.conversationId, msg.userId, msg.groupId, it, toolName))
+                    }
+                    if (result.endTurn) endTurn = true
+                }
+                compactOldToolRounds(history)
+                compactor.ensureContextBudget(history)
+                if (endTurn) {
+                    log("step ${step + 1}: endTurn signaled, finishing turn")
+                    return
+                }
             }
-            compactOldToolRounds(history)
-            compactor.ensureContextBudget(history)
-            if (endTurn) {
-                log("step ${step + 1}: endTurn signaled, finishing turn")
-                if (clearContextAfter) store.clear(msg.conversationId)
-                return
-            }
-        }
-        // 步数耗尽：不再给工具，让模型基于已有信息整理现状并向用户汇报。
-        log("reached maxSteps (${config.maxSteps}); requesting a wrap-up summary")
-        history += ChatMessage(
-            role = ChatRole.User,
-            content = "System notice: the step budget for this turn is exhausted; no more tools can be " +
-                "called. Based on the information gathered so far, summarize the current situation and " +
-                "report your conclusion to the user, and explicitly note that some actions may be " +
-                "incomplete because the step limit was reached. Reply in the user's language.",
-        )
-        val wrapUp = openAi.chatCompletion(
-            ChatCompletionRequest(
-                model = config.model,
-                messages = history.toList(),
-                temperature = config.temperature,
+            // 步数耗尽
+            log("reached maxSteps (${config.maxSteps}); requesting a wrap-up summary")
+            history += ChatMessage(
+                role = ChatRole.User,
+                content = "System notice: the step budget for this turn is exhausted; no more tools can be " +
+                    "called. Based on the information gathered so far, summarize the current situation and " +
+                    "report your conclusion to the user, and explicitly note that some actions may be " +
+                    "incomplete because the step limit was reached. Reply in the user's language.",
             )
-        ).choices.first().message
-        history += wrapUp
-        wrapUp.content?.takeIf { it.isNotBlank() }?.let {
-            emit(OutboundMessage.AgentReply(msg.conversationId, msg.userId, msg.groupId, it))
+            val wrapUp = openAi.chatCompletion(
+                ChatCompletionRequest(
+                    model = config.model,
+                    messages = history.toList(),
+                    temperature = config.temperature,
+                )
+            ).choices.first().message
+            history += wrapUp
+            assistantReply = wrapUp.content
+            wrapUp.content?.takeIf { it.isNotBlank() }?.let {
+                emit(OutboundMessage.AgentReply(msg.conversationId, msg.userId, msg.groupId, it))
+            }
+        } finally {
+            // 无论如何都保存原始记忆
+            if (memoryStore != null && config.memoryEnabled) {
+                try {
+                    val rawMemories = mutableListOf<RawMemory>()
+                    rawMemories.add(
+                        RawMemory(
+                            userId = msg.userId,
+                            conversationId = msg.conversationId,
+                            role = "user",
+                            content = msg.content,
+                        )
+                    )
+                    if (assistantReply != null) {
+                        rawMemories.add(
+                            RawMemory(
+                                userId = msg.userId,
+                                conversationId = msg.conversationId,
+                                role = "assistant",
+                                content = assistantReply!!,
+                            )
+                        )
+                    }
+                    for (raw in rawMemories) {
+                        memoryStore.rememberRaw(raw)
+                    }
+                } catch (e: Exception) {
+                    println("[Vicky] 原始记忆保存失败: ${e.message}")
+                }
+            }
+
+            // 清理上下文
+            if (clearContextAfter) {
+                store.clear(msg.conversationId)
+                log("cleared context for '${msg.conversationId}' after reply")
+            }
         }
-        if (clearContextAfter) store.clear(msg.conversationId)
     }
 
     private suspend fun invokeTool(
@@ -230,7 +348,6 @@ abstract class Agent(
         if (history.isEmpty() || history.first().role != ChatRole.System) {
             history.add(0, ChatMessage(role = ChatRole.System, content = prompt))
         } else {
-            // 每轮刷新 system，工具增删能立刻反映。
             history[0] = ChatMessage(role = ChatRole.System, content = prompt)
         }
     }

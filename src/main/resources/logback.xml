@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss} %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- 关闭 Mirai/Overflow 日志 -->
+    <logger name="net.mamoe" level="ERROR"/>
+    <logger name="top.mrxiaom.mirai" level="ERROR"/>
+    <logger name="Onebot" level="ERROR"/>
+
+    <!-- 关闭其他 verbose 日志 -->
+    <logger name="io.ktor" level="WARN"/>
+    <logger name="okhttp3" level="WARN"/>
+
+    <root level="WARN">
+        <appender-ref ref="STDOUT"/>
+    </root>
+</configuration>

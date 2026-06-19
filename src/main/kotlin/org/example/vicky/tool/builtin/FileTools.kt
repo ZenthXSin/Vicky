@@ -35,6 +35,7 @@ class FileReadTool(private val baseDir: File) : Tool() {
     override val name = "file_read"
     override val description =
         "Read a text file's content. Pass a relative path from the project root. " +
+            "Use after file_search to read found files, or after file_list to read specific files. " +
             "Returns file content (truncated at 20000 chars). " +
             "Binary files and paths outside the project directory are rejected."
     override val parameters: JsonObject = buildJsonObject {
@@ -149,8 +150,9 @@ class FileWriteTool(private val baseDir: File) : Tool() {
 class FileListTool(private val baseDir: File) : Tool() {
     override val name = "file_list"
     override val description =
-        "List contents of a directory. Shows subdirectories and files with sizes. " +
-            "Optionally filter by glob pattern. Paths outside the project directory are rejected."
+        "List contents of a directory. Use when you know the directory path and want to browse its structure. " +
+            "For content-based searching, use file_search instead. " +
+            "Shows subdirectories and files with sizes. Paths outside the project directory are rejected."
     override val parameters: JsonObject = buildJsonObject {
         put("type", "object")
         putJsonObject("properties") {

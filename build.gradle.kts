@@ -15,11 +15,21 @@ repositories {
 dependencies {
     implementation("com.aallam.openai:openai-client:4.1.0")
     implementation("io.ktor:ktor-client-okhttp:3.0.0")
+    implementation("io.ktor:ktor-client-content-negotiation:3.0.0")
+    implementation("io.ktor:ktor-serialization-kotlinx-json:3.0.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
-    implementation("org.slf4j:slf4j-simple:2.0.13")
+    implementation("ch.qos.logback:logback-classic:1.5.12")
 
     implementation("top.mrxiaom.mirai:overflow-core:1.1.0")
+
+    // 内置语义模型（DJL + HuggingFace sentence-transformers，本地推理）
+    implementation("ai.djl:api:0.31.1")
+    implementation("ai.djl.huggingface:tokenizers:0.30.0")
+    implementation("ai.djl.pytorch:pytorch-engine:0.30.0")
+    implementation("ai.djl.pytorch:pytorch-model-zoo:0.30.0")
+
+    // 向量存储（Qdrant REST API，通过 Ktor HTTP 客户端调用）
 
     testImplementation(kotlin("test"))
 }
@@ -47,6 +57,15 @@ tasks.shadowJar {
 // 而我们只需要 shadowJar，因此禁用这些发行任务。
 tasks.matching { it.name in setOf("startShadowScripts", "shadowDistTar", "shadowDistZip") }
     .configureEach { enabled = false }
+
+// JDK 17+ 需要显式 --add-opens 才能反射注入进程环境变量
+// （BuiltinEmbeddingClient.configureProxy 需要给原生 tokenizer 注入 HTTPS_PROXY）
+tasks.withType<JavaExec>().configureEach {
+    jvmArgs(
+        "--add-opens=java.base/java.util=ALL-UNNAMED",
+        "--add-opens=java.base/java.lang=ALL-UNNAMED",
+    )
+}
 
 tasks.build {
     dependsOn(tasks.shadowJar)

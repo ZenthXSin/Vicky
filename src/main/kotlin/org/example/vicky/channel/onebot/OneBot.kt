@@ -10,6 +10,7 @@ import net.mamoe.mirai.event.events.GroupMessageEvent
 import net.mamoe.mirai.event.events.StrangerMessageEvent
 import net.mamoe.mirai.message.data.*
 import net.mamoe.mirai.message.data.Image.Key.queryUrl
+import net.mamoe.mirai.message.data.buildForwardMessage
 import org.example.vicky.agent.Agent
 import org.example.vicky.agent.AgentConfig
 import org.example.vicky.io.InboundMessage
@@ -36,7 +37,7 @@ class OneBot(
     val messageSourceCache = ConcurrentHashMap<String, MessageSource>()
 
     var bot: Bot? = null
-        private set
+    private set
 
     lateinit var agent: OneBotAgent
         private set
@@ -53,8 +54,11 @@ class OneBot(
         agent.registerTool(GroupMembersTool(bot!!))
         agent.registerTool(UserProfileTool(bot!!))
         // Register mirai L2 tools (write operations, admin-gated)
-        listOf("send_message", "group_manage", "friend_manage", "group_quit", "group_announcements", "file_write")
-            .forEach { adminToolList.add(it) }
+        listOf(
+            "send_message", "group_manage", "friend_manage", "group_quit", "group_announcements",
+            "file_write", "send_image", "send_video", "recall_message", "set_name_card",
+            "essence_message", "group_files"
+        ).forEach { adminToolList.add(it) }
         agent.registerTool(SendMessageTool(bot!!))
         agent.registerTool(GroupManageTool(bot!!))
         agent.registerTool(FriendManageTool(bot!!))
@@ -63,6 +67,17 @@ class OneBot(
         // Register at & reply tools
         agent.registerTool(AtTool(bot!!))
         agent.registerTool(ReplyMessageTool(bot!!, messageSourceCache))
+        // Register new tools
+        agent.registerTool(RecallMessageTool(bot!!, messageSourceCache))
+        agent.registerTool(SendImageTool(bot!!))
+        agent.registerTool(SendVideoTool(bot!!))
+        agent.registerTool(FriendRequestTool(bot!!))
+        agent.registerTool(GroupInviteTool(bot!!))
+        agent.registerTool(MemberJoinRequestTool(bot!!))
+        agent.registerTool(SetNameCardTool(bot!!))
+        agent.registerTool(EssenceMessageTool(bot!!, messageSourceCache))
+        agent.registerTool(RoamingMessagesTool(bot!!))
+        agent.registerTool(GroupFilesTool(bot!!))
         registerListeners()
         return true
     }
@@ -228,7 +243,7 @@ class OneBot(
         currentText: String,
         senderName: String,
     ): InboundMessage {
-        val recentText = buffer.getText(conversationId)
+        val recentText = buffer.getText(conversationId).takeLast(15)
         val sb = StringBuilder()
         // 环境元数据
         if (groupId.isNotEmpty()) {
@@ -241,7 +256,8 @@ class OneBot(
             sb.appendLine("--- 近期聊天记录 ---")
             recentText.forEach {
                 val refTag = if (it.msgRef.isNotEmpty()) "${it.msgRef} " else ""
-                sb.appendLine("$refTag[${it.senderName}:${it.userId}] ${it.text}")
+                val truncated = if (it.text.length > 200) it.text.take(200) + "…" else it.text
+                sb.appendLine("$refTag[${it.senderName}:${it.userId}] $truncated")
             }
             sb.appendLine("--- 当前消息 ---")
         }
@@ -266,9 +282,34 @@ class OneBot(
         private val adminToolList: Set<String>,
     ) : Agent(config) {
 
+        private suspend fun sendSmart(target: net.mamoe.mirai.contact.Contact, text: String) {
+            if (text.length > 100) {
+                target.sendMessage(buildForwardMessage(target) {
+                    add(target.id, bot.nick, PlainText(text))
+                })
+            } else {
+                target.sendMessage(text)
+            }
+        }
+
         override val sink = MessageSink { out ->
             when (out) {
-                is OutboundMessage.AgentReply,
+                is OutboundMessage.AgentReply -> {
+                    val text = out.content
+                    when {
+                        out.groupId.isNotEmpty() -> {
+                            val group = bot.getGroup(out.groupId.toLongOrNull() ?: return@MessageSink)
+                                ?: return@MessageSink
+                            sendSmart(group, text)
+                        }
+                        else -> {
+                            val uid = out.userId.toLongOrNull() ?: return@MessageSink
+                            val contact = bot.getFriend(uid) ?: bot.getStranger(uid)
+                                ?: return@MessageSink
+                            sendSmart(contact, text)
+                        }
+                    }
+                }
                 is OutboundMessage.ToolReply -> {
                     val text = out.content
                     when {
@@ -277,7 +318,6 @@ class OneBot(
                                 ?.sendMessage(text)
                         else -> {
                             val uid = out.userId.toLongOrNull() ?: return@MessageSink
-                            // 优先好友，fallback 到陌生人/临时会话
                             val contact = bot.getFriend(uid) ?: bot.getStranger(uid)
                             contact?.sendMessage(text)
                         }

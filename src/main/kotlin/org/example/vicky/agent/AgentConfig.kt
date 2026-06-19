@@ -1,4 +1,4 @@
-﻿package org.example.vicky.agent
+package org.example.vicky.agent
 
 import com.aallam.openai.api.model.ModelId
 
@@ -16,6 +16,7 @@ import com.aallam.openai.api.model.ModelId
  * @property agentMd 基础系统提示文本 (人设/指令)，直接内联，不再读文件。
  * @property debug 打开后输出框架运行日志 (每轮推理 / 工具调用) 及底层 HTTP 日志。
  * @property think 打开后把 agent 每轮的中间思考文本 (调用工具前的 content) 打到日志。
+ * @property embedding 语义模型配置；null = 未启用。内置 / 外置互斥，见 [EmbeddingConfig]。
  */
 data class AgentConfig(
     val model: ModelId,
@@ -30,4 +31,33 @@ data class AgentConfig(
     val debug: Boolean = false,
     val think: Boolean = false,
     val builtinTools: Boolean = true,
+    val embedding: EmbeddingConfig? = null,
+    // Qdrant 配置
+    val qdrantHost: String? = null,
+    val qdrantGrpcPort: Int = 6334,
+    val qdrantHttpPort: Int = 6333,
+    // 记忆配置
+    val memoryEnabled: Boolean = false,
+    val memoryTopK: Int = 5,
+    val memoryTokenBudget: Int = 800,
+    val memoryMaxPerUser: Int = 500,
+    val memoryExpiryDays: Int = 90,
+    val memoryRawRetentionDays: Int = 30,
+    val memoryDistilledRetentionDays: Int = 7,
+    val memoryCollection: String = "vicky_memories",
+    val memoryRawCollection: String = "vicky_memories_raw",
+    // 蒸馏配置
+    val distillationEnabled: Boolean = true,
+    val distillationSchedule: String = "0 2 * * *",
+    val distillationMaxConversations: Int = 10,
+    val distillationTemperature: Double = 0.1,
+    val distillationMaxTokens: Int = 1000,
+    // 文件索引配置
+    val fileIndexEnabled: Boolean = false,
+    val fileIndexCollection: String = "vicky_files",
+    val fileIndexChunkSize: Int = 500,
+    val fileIndexChunkOverlap: Int = 50,
+    val fileIndexIgnorePatterns: List<String> = listOf(".git", ".gradle", "build", "node_modules"),
+    val fileIndexPaths: List<String> = emptyList(),
+    val fileIndexAutoIndexOnStart: Boolean = true,
 )

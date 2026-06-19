@@ -5,6 +5,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import org.example.vicky.agent.AgentConfig
 import org.example.vicky.agent.AgentMode
+import org.example.vicky.agent.EmbeddingConfig
 import java.io.File
 
 @Serializable
@@ -21,14 +22,81 @@ data class ConfigData(
     val debug: Boolean = false,
     val think: Boolean = false,
     val builtinTools: Boolean = true,
+    val embedding: EmbeddingConfigData = EmbeddingConfigData(),
     val oneBot: OneBotConfigData = OneBotConfigData(),
+    val qdrant: QdrantConfigData = QdrantConfigData(),
+    val memory: MemoryConfigData = MemoryConfigData(),
+)
+
+@Serializable
+data class QdrantConfigData(
+    val host: String = "localhost",
+    val grpcPort: Int = 6334,
+    val httpPort: Int = 6333,
+    val enabled: Boolean = false,
+)
+
+@Serializable
+data class MemoryConfigData(
+    val enabled: Boolean = false,
+    val topK: Int = 5,
+    val tokenBudget: Int = 800,
+    val maxPerUser: Int = 500,
+    val expiryDays: Int = 90,
+    val rawRetentionDays: Int = 30,
+    val distilledRetentionDays: Int = 7,
+    val collection: String = "vicky_memories",
+    val rawCollection: String = "vicky_memories_raw",
+    val distillationEnabled: Boolean = true,
+    val distillationSchedule: String = "0 2 * * *",
+    val distillationMaxConversations: Int = 10,
+    val distillationTemperature: Double = 0.1,
+    val distillationMaxTokens: Int = 1000,
+    val fileIndexEnabled: Boolean = false,
+    val fileIndexCollection: String = "vicky_files",
+    val fileIndexChunkSize: Int = 500,
+    val fileIndexChunkOverlap: Int = 50,
+    val fileIndexIgnorePatterns: List<String> = listOf(".git", ".gradle", "build", "node_modules"),
+    val fileIndexPaths: List<String> = emptyList(),
+    val fileIndexAutoIndexOnStart: Boolean = true,
+)
+
+/**
+ * 语义模型配置。内置 / 外置互斥：
+ * - `type = "builtin"`：使用 [builtin] 段，进程内本地推理。
+ * - `type = "external"`：使用 [external] 段，OpenAI 协议远程端点。
+ * `enabled = false` 时整段忽略，AgentConfig.embedding 为 null。
+ */
+@Serializable
+data class EmbeddingConfigData(
+    val enabled: Boolean = false,
+    val type: String = "builtin",
+    val builtin: BuiltinEmbeddingData = BuiltinEmbeddingData(),
+    val external: ExternalEmbeddingData = ExternalEmbeddingData(),
+)
+
+@Serializable
+data class BuiltinEmbeddingData(
+    val model: String = "sentence-transformers/all-MiniLM-L6-v2",
+    /** 本地模型目录（非空时优先离线加载，不走网络）。 */
+    val modelPath: String = "",
+    /** HuggingFace 镜像端点（仅 modelPath 为空时生效），如 "https://hf-mirror.com"。 */
+    val endpoint: String = "",
+    val proxy: String = "",
+)
+
+@Serializable
+data class ExternalEmbeddingData(
+    val baseUrl: String = "",
+    val apiKey: String = "",
+    val model: String = "",
 )
 
 @Serializable
 data class OneBotConfigData(
     val url: String = "ws://127.0.0.1:3001",
     val token: String = "",
-    val adminList: List<String> = listOf("488254306","2703872748"),
+    val adminList: List<String> = listOf("488254306", "2703872748"),
 )
 
 object ConfigManager {
@@ -90,8 +158,8 @@ object ConfigManager {
             apiKey = "sk-Nhxs7MO3HDspptIICNmgobNdmeSc4RcIM6Aa4FLxvqgxeM6S",
             baseUrl = "http://192.168.0.108:3000/v1/",
             maxSteps = 60,
-            maxMemoryRounds = 50,
-            maxContextLength = 0,
+            maxMemoryRounds = 10,
+            maxContextLength = 16000,
             mode = "VERBOSE",
             temperature = null,
             agentMd = agentMdFileName,
@@ -119,6 +187,8 @@ object ConfigManager {
             "CHAT" -> AgentMode.CHAT
             else -> AgentMode.SILENT
         }
+        val memory = configData.memory
+        val qdrant = configData.qdrant
         return AgentConfig(
             model = ModelId(configData.model),
             apiKey = configData.apiKey,
@@ -132,7 +202,64 @@ object ConfigManager {
             debug = configData.debug,
             think = configData.think,
             builtinTools = configData.builtinTools,
+            embedding = toEmbeddingConfig(configData.embedding),
+            qdrantHost = if (qdrant.enabled) qdrant.host else null,
+            qdrantGrpcPort = qdrant.grpcPort,
+            qdrantHttpPort = qdrant.httpPort,
+            memoryEnabled = memory.enabled,
+            memoryTopK = memory.topK,
+            memoryTokenBudget = memory.tokenBudget,
+            memoryMaxPerUser = memory.maxPerUser,
+            memoryExpiryDays = memory.expiryDays,
+            memoryRawRetentionDays = memory.rawRetentionDays,
+            memoryDistilledRetentionDays = memory.distilledRetentionDays,
+            memoryCollection = memory.collection,
+            memoryRawCollection = memory.rawCollection,
+            distillationEnabled = memory.distillationEnabled,
+            distillationSchedule = memory.distillationSchedule,
+            distillationMaxConversations = memory.distillationMaxConversations,
+            distillationTemperature = memory.distillationTemperature,
+            distillationMaxTokens = memory.distillationMaxTokens,
+            fileIndexEnabled = memory.fileIndexEnabled,
+            fileIndexCollection = memory.fileIndexCollection,
+            fileIndexChunkSize = memory.fileIndexChunkSize,
+            fileIndexChunkOverlap = memory.fileIndexChunkOverlap,
+            fileIndexIgnorePatterns = memory.fileIndexIgnorePatterns,
+            fileIndexPaths = memory.fileIndexPaths,
+            fileIndexAutoIndexOnStart = memory.fileIndexAutoIndexOnStart,
         )
+    }
+
+    /**
+     * 把 JSON 层的 [EmbeddingConfigData] 转成 sealed [EmbeddingConfig]。
+     * - `enabled = false` -> null
+     * - `type = "builtin"`  -> [EmbeddingConfig.Builtin]
+     * - `type = "external"` -> [EmbeddingConfig.External]；baseUrl/apiKey/model 任一为空抛异常
+     * - 其他 type 抛异常
+     */
+    private fun toEmbeddingConfig(data: EmbeddingConfigData): EmbeddingConfig? {
+        if (!data.enabled) return null
+        return when (data.type.lowercase()) {
+            "builtin" -> {
+                require(data.builtin.model.isNotBlank()) {
+                    "内置语义模型需配置 builtin.model"
+                }
+                EmbeddingConfig.Builtin(
+                    model = data.builtin.model,
+                    modelPath = data.builtin.modelPath,
+                    endpoint = data.builtin.endpoint,
+                    proxy = data.builtin.proxy,
+                )
+            }
+            "external" -> {
+                val e = data.external
+                require(e.baseUrl.isNotBlank() && e.model.isNotBlank()) {
+                    "外置语义模型需配置 baseUrl/model"
+                }
+                EmbeddingConfig.External(baseUrl = e.baseUrl, apiKey = e.apiKey, model = e.model)
+            }
+            else -> error("未知的 embedding.type: '${data.type}'（仅支持 builtin / external）")
+        }
     }
 
     private fun deriveFileName(agentMdContent: String): String {

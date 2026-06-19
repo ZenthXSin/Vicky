@@ -17,11 +17,17 @@ import net.mamoe.mirai.contact.NormalMember
 import net.mamoe.mirai.contact.announcement.AnnouncementParametersBuilder
 import net.mamoe.mirai.contact.announcement.OfflineAnnouncement
 import net.mamoe.mirai.contact.nameCardOrNick
+import net.mamoe.mirai.contact.roaming.RoamingMessages
 import net.mamoe.mirai.data.UserProfile
+import net.mamoe.mirai.Mirai
 import net.mamoe.mirai.message.data.At
 import net.mamoe.mirai.message.data.MessageSource
+import net.mamoe.mirai.message.data.MessageChain
+import net.mamoe.mirai.message.data.PlainText
 import net.mamoe.mirai.message.data.QuoteReply
 import net.mamoe.mirai.message.data.plus
+import net.mamoe.mirai.message.data.source
+import net.mamoe.mirai.utils.ExternalResource.Companion.toExternalResource
 import org.example.vicky.tool.ToolResult
 import java.util.concurrent.ConcurrentHashMap
 
@@ -661,6 +667,730 @@ class ReplyMessageTool(
                 ToolResult(toAgent = "Replied to $ref in friend chat $tid.", userReply = null, endTurn = endTurn)
             }
             else -> ToolResult(toAgent = "Error: chatType must be 'group' or 'friend'.")
+        }
+    }
+}
+
+// ─── recall_message ─────────────────────────────────────────
+
+class RecallMessageTool(
+    bot: Bot,
+    private val sourceCache: ConcurrentHashMap<String, MessageSource>,
+) : MiraiTool(bot) {
+    override val name = "recall_message"
+    override val description =
+        "Recall (retract) a sent message. Pass the messageRef (e.g. '#42') seen in chat history. " +
+            "Bot can recall its own messages; admin can recall group member messages."
+    override val parameters: JsonObject = buildJsonObject {
+        put("type", "object")
+        putJsonObject("properties") {
+            putJsonObject("messageRef") {
+                put("type", "string")
+                put("description", "Message reference id from chat history, e.g. '#42'.")
+            }
+        }
+        put("required", buildJsonArray { add(JsonPrimitive("messageRef")) })
+    }
+
+    override suspend fun execute(userId: String, args: JsonObject): ToolResult {
+        val ref = args["messageRef"]?.jsonPrimitive?.content?.trim()
+            ?: return ToolResult(toAgent = "Error: missing 'messageRef'.")
+        val source = sourceCache[ref]
+            ?: return ToolResult(toAgent = "Error: messageRef '$ref' not found in cache. It may have expired.")
+        return try {
+            Mirai.recallMessage(bot, source)
+            ToolResult(toAgent = "Recalled message $ref.")
+        } catch (e: Exception) {
+            ToolResult(toAgent = "Error recalling message $ref: ${e.message}")
+        }
+    }
+}
+
+// ─── send_image ────────────────────────────────────────────
+
+class SendImageTool(bot: Bot) : MiraiTool(bot) {
+    override val name = "send_image"
+    override val description =
+        "Send an image to a group, friend, or temp-session user. " +
+            "Provide chatType, targetId, and imageUrl (a direct URL to an image file)."
+    override val parameters: JsonObject = buildJsonObject {
+        put("type", "object")
+        putJsonObject("properties") {
+            putJsonObject("chatType") {
+                put("type", "string")
+                put("description", "'group', 'friend', or 'temp'.")
+                put("enum", buildJsonArray {
+                    add(JsonPrimitive("group")); add(JsonPrimitive("friend")); add(JsonPrimitive("temp"))
+                })
+            }
+            putJsonObject("targetId") {
+                put("type", "string")
+                put("description", "Group id or QQ number.")
+            }
+            putJsonObject("imageUrl") {
+                put("type", "string")
+                put("description", "Direct URL to the image file.")
+            }
+        }
+        put("required", buildJsonArray {
+            add(JsonPrimitive("chatType")); add(JsonPrimitive("targetId")); add(JsonPrimitive("imageUrl"))
+        })
+    }
+
+    override suspend fun execute(userId: String, args: JsonObject): ToolResult {
+        val chatType = args["chatType"]?.jsonPrimitive?.content
+            ?: return ToolResult(toAgent = "Error: missing 'chatType'.")
+        val tid = args["targetId"]?.jsonPrimitive?.long
+            ?: return ToolResult(toAgent = "Error: missing 'targetId'.")
+        val imageUrl = args["imageUrl"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+            ?: return ToolResult(toAgent = "Error: missing or empty 'imageUrl'.")
+
+        val contact = when (chatType) {
+            "group" -> bot.getGroup(tid) ?: return ToolResult(toAgent = "Error: group $tid not found.")
+            "friend" -> bot.getFriend(tid) ?: return ToolResult(toAgent = "Error: friend $tid not found.")
+            "temp" -> bot.getStranger(tid) ?: bot.getFriend(tid)
+                ?: return ToolResult(toAgent = "Error: user $tid not found.")
+            else -> return ToolResult(toAgent = "Error: chatType must be 'group', 'friend', or 'temp'.")
+        }
+
+        return try {
+            val image = java.net.URL(imageUrl).openStream().use { stream ->
+                stream.toExternalResource().use { resource ->
+                    contact.uploadImage(resource)
+                }
+            }
+            contact.sendMessage(image)
+            ToolResult(toAgent = "Image sent to $chatType $tid.", userReply = null)
+        } catch (e: Exception) {
+            ToolResult(toAgent = "Error sending image: ${e.message}")
+        }
+    }
+}
+
+// ─── send_video ────────────────────────────────────────────
+
+class SendVideoTool(bot: Bot) : MiraiTool(bot) {
+    override val name = "send_video"
+    override val description =
+        "Send a short video to a group or friend. " +
+            "Provide chatType, targetId, videoUrl, and optionally thumbnailUrl."
+    override val parameters: JsonObject = buildJsonObject {
+        put("type", "object")
+        putJsonObject("properties") {
+            putJsonObject("chatType") {
+                put("type", "string")
+                put("description", "'group' or 'friend'.")
+                put("enum", buildJsonArray { add(JsonPrimitive("group")); add(JsonPrimitive("friend")) })
+            }
+            putJsonObject("targetId") {
+                put("type", "string")
+                put("description", "Group id or QQ number.")
+            }
+            putJsonObject("videoUrl") {
+                put("type", "string")
+                put("description", "Direct URL to the video file (mp4).")
+            }
+            putJsonObject("thumbnailUrl") {
+                put("type", "string")
+                put("description", "Direct URL to the thumbnail image. Optional, auto-generated if omitted.")
+            }
+        }
+        put("required", buildJsonArray {
+            add(JsonPrimitive("chatType")); add(JsonPrimitive("targetId")); add(JsonPrimitive("videoUrl"))
+        })
+    }
+
+    override suspend fun execute(userId: String, args: JsonObject): ToolResult {
+        val chatType = args["chatType"]?.jsonPrimitive?.content
+            ?: return ToolResult(toAgent = "Error: missing 'chatType'.")
+        val tid = args["targetId"]?.jsonPrimitive?.long
+            ?: return ToolResult(toAgent = "Error: missing 'targetId'.")
+        val videoUrl = args["videoUrl"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+            ?: return ToolResult(toAgent = "Error: missing or empty 'videoUrl'.")
+
+        val contact = when (chatType) {
+            "group" -> bot.getGroup(tid) ?: return ToolResult(toAgent = "Error: group $tid not found.")
+            "friend" -> bot.getFriend(tid) ?: return ToolResult(toAgent = "Error: friend $tid not found.")
+            else -> return ToolResult(toAgent = "Error: chatType must be 'group' or 'friend'.")
+        }
+
+        return try {
+            val thumbnailUrl = args["thumbnailUrl"]?.jsonPrimitive?.content
+            val videoResource = java.net.URL(videoUrl).openStream().use { stream ->
+                stream.toExternalResource()
+            }
+            val thumbnailResource = if (!thumbnailUrl.isNullOrBlank()) {
+                java.net.URL(thumbnailUrl).openStream().use { stream ->
+                    stream.toExternalResource()
+                }
+            } else {
+                java.net.URL(videoUrl).openStream().use { stream ->
+                    stream.toExternalResource()
+                }
+            }
+            val shortVideo = contact.uploadShortVideo(thumbnailResource, videoResource)
+            contact.sendMessage(shortVideo)
+            ToolResult(toAgent = "Video sent to $chatType $tid.", userReply = null)
+        } catch (e: Exception) {
+            ToolResult(toAgent = "Error sending video: ${e.message}")
+        }
+    }
+}
+
+// ─── friend_request ────────────────────────────────────────
+
+class FriendRequestTool(bot: Bot) : MiraiTool(bot) {
+    override val name = "friend_request"
+    override val description =
+        "Manage friend requests. Actions: 'list' (list pending requests), " +
+            "'accept' (accept a request by eventId), 'reject' (reject a request by eventId, optional blacklist)."
+    override val parameters: JsonObject = buildJsonObject {
+        put("type", "object")
+        putJsonObject("properties") {
+            putJsonObject("action") {
+                put("type", "string")
+                put("description", "'list', 'accept', or 'reject'.")
+                put("enum", buildJsonArray {
+                    add(JsonPrimitive("list")); add(JsonPrimitive("accept")); add(JsonPrimitive("reject"))
+                })
+            }
+            putJsonObject("eventId") {
+                put("type", "string")
+                put("description", "Event id (required for accept/reject).")
+            }
+            putJsonObject("blacklist") {
+                put("type", "boolean")
+                put("description", "Whether to blacklist after reject (default false).")
+            }
+        }
+        put("required", buildJsonArray { add(JsonPrimitive("action")) })
+    }
+
+    override suspend fun execute(userId: String, args: JsonObject): ToolResult {
+        val action = args["action"]?.jsonPrimitive?.content
+            ?: return ToolResult(toAgent = "Error: missing 'action'.")
+
+        return when (action) {
+            "list" -> {
+                val events = mutableListOf<net.mamoe.mirai.event.events.NewFriendRequestEvent>()
+                bot.eventChannel.subscribeAlways<net.mamoe.mirai.event.events.NewFriendRequestEvent> {
+                    events.add(this)
+                }
+                if (events.isEmpty()) {
+                    ToolResult(toAgent = "No pending friend requests.")
+                } else {
+                    val lines = events.map { e ->
+                        "eventId=${e.eventId} | from=${e.fromId}(${e.fromNick}) | msg='${e.message}' | group=${e.fromGroupId}"
+                    }
+                    ToolResult(toAgent = "Pending friend requests (${events.size}):\n${lines.joinToString("\n")}")
+                }
+            }
+            "accept" -> {
+                val eventId = args["eventId"]?.jsonPrimitive?.long
+                    ?: return ToolResult(toAgent = "Error: missing 'eventId'.")
+                // Use Mirai API to accept
+                try {
+                    val event = findFriendRequestEvent(eventId)
+                        ?: return ToolResult(toAgent = "Error: friend request event $eventId not found (may have expired).")
+                    event.accept()
+                    ToolResult(toAgent = "Accepted friend request from ${event.fromId}(${event.fromNick}).")
+                } catch (e: Exception) {
+                    ToolResult(toAgent = "Error accepting friend request: ${e.message}")
+                }
+            }
+            "reject" -> {
+                val eventId = args["eventId"]?.jsonPrimitive?.long
+                    ?: return ToolResult(toAgent = "Error: missing 'eventId'.")
+                val blacklist = args["blacklist"]?.jsonPrimitive?.boolean ?: false
+                try {
+                    val event = findFriendRequestEvent(eventId)
+                        ?: return ToolResult(toAgent = "Error: friend request event $eventId not found (may have expired).")
+                    event.reject(blacklist)
+                    ToolResult(toAgent = "Rejected friend request from ${event.fromId}(${event.fromNick}), blacklist=$blacklist.")
+                } catch (e: Exception) {
+                    ToolResult(toAgent = "Error rejecting friend request: ${e.message}")
+                }
+            }
+            else -> ToolResult(toAgent = "Error: unknown action '$action'. Use 'list', 'accept', or 'reject'.")
+        }
+    }
+
+    private suspend fun findFriendRequestEvent(eventId: Long): net.mamoe.mirai.event.events.NewFriendRequestEvent? {
+        var found: net.mamoe.mirai.event.events.NewFriendRequestEvent? = null
+        bot.eventChannel.subscribeAlways<net.mamoe.mirai.event.events.NewFriendRequestEvent> {
+            if (this.eventId == eventId) found = this
+        }
+        return found
+    }
+}
+
+// ─── group_invite ──────────────────────────────────────────
+
+class GroupInviteTool(bot: Bot) : MiraiTool(bot) {
+    override val name = "group_invite"
+    override val description =
+        "Manage group invitations (bot invited to join group). " +
+            "Actions: 'accept' (accept invitation by eventId), 'ignore' (ignore invitation by eventId)."
+    override val parameters: JsonObject = buildJsonObject {
+        put("type", "object")
+        putJsonObject("properties") {
+            putJsonObject("action") {
+                put("type", "string")
+                put("description", "'accept' or 'ignore'.")
+                put("enum", buildJsonArray { add(JsonPrimitive("accept")); add(JsonPrimitive("ignore")) })
+            }
+            putJsonObject("eventId") {
+                put("type", "string")
+                put("description", "Event id of the invitation.")
+            }
+        }
+        put("required", buildJsonArray { add(JsonPrimitive("action")); add(JsonPrimitive("eventId")) })
+    }
+
+    override suspend fun execute(userId: String, args: JsonObject): ToolResult {
+        val action = args["action"]?.jsonPrimitive?.content
+            ?: return ToolResult(toAgent = "Error: missing 'action'.")
+        val eventId = args["eventId"]?.jsonPrimitive?.long
+            ?: return ToolResult(toAgent = "Error: missing 'eventId'.")
+
+        return try {
+            val event = findGroupInviteEvent(eventId)
+                ?: return ToolResult(toAgent = "Error: group invite event $eventId not found (may have expired).")
+            when (action) {
+                "accept" -> {
+                    event.accept()
+                    ToolResult(toAgent = "Accepted group invite from ${event.invitorId}(${event.invitorNick}) to group ${event.groupId}(${event.groupName}).")
+                }
+                "ignore" -> {
+                    event.ignore()
+                    ToolResult(toAgent = "Ignored group invite from ${event.invitorId}(${event.invitorNick}) to group ${event.groupId}(${event.groupName}).")
+                }
+                else -> ToolResult(toAgent = "Error: unknown action '$action'. Use 'accept' or 'ignore'.")
+            }
+        } catch (e: Exception) {
+            ToolResult(toAgent = "Error handling group invite: ${e.message}")
+        }
+    }
+
+    private suspend fun findGroupInviteEvent(eventId: Long): net.mamoe.mirai.event.events.BotInvitedJoinGroupRequestEvent? {
+        var found: net.mamoe.mirai.event.events.BotInvitedJoinGroupRequestEvent? = null
+        bot.eventChannel.subscribeAlways<net.mamoe.mirai.event.events.BotInvitedJoinGroupRequestEvent> {
+            if (this.eventId == eventId) found = this
+        }
+        return found
+    }
+}
+
+// ─── member_join_request ───────────────────────────────────
+
+class MemberJoinRequestTool(bot: Bot) : MiraiTool(bot) {
+    override val name = "member_join_request"
+    override val description =
+        "Manage group join requests (someone requests to join a group where bot is admin). " +
+            "Actions: 'accept' (accept by eventId), 'reject' (reject by eventId, optional blacklist and message), " +
+            "'ignore' (ignore by eventId)."
+    override val parameters: JsonObject = buildJsonObject {
+        put("type", "object")
+        putJsonObject("properties") {
+            putJsonObject("action") {
+                put("type", "string")
+                put("description", "'accept', 'reject', or 'ignore'.")
+                put("enum", buildJsonArray {
+                    add(JsonPrimitive("accept")); add(JsonPrimitive("reject")); add(JsonPrimitive("ignore"))
+                })
+            }
+            putJsonObject("eventId") {
+                put("type", "string")
+                put("description", "Event id of the join request.")
+            }
+            putJsonObject("blacklist") {
+                put("type", "boolean")
+                put("description", "Whether to blacklist after reject (default false).")
+            }
+            putJsonObject("message") {
+                put("type", "string")
+                put("description", "Rejection message (for reject action).")
+            }
+        }
+        put("required", buildJsonArray { add(JsonPrimitive("action")); add(JsonPrimitive("eventId")) })
+    }
+
+    override suspend fun execute(userId: String, args: JsonObject): ToolResult {
+        val action = args["action"]?.jsonPrimitive?.content
+            ?: return ToolResult(toAgent = "Error: missing 'action'.")
+        val eventId = args["eventId"]?.jsonPrimitive?.long
+            ?: return ToolResult(toAgent = "Error: missing 'eventId'.")
+
+        return try {
+            val event = findMemberJoinRequestEvent(eventId)
+                ?: return ToolResult(toAgent = "Error: member join request event $eventId not found (may have expired).")
+            when (action) {
+                "accept" -> {
+                    event.accept()
+                    ToolResult(toAgent = "Accepted join request from ${event.fromId}(${event.fromNick}) to group ${event.groupId}(${event.groupName}).")
+                }
+                "reject" -> {
+                    val blacklist = args["blacklist"]?.jsonPrimitive?.boolean ?: false
+                    val message = args["message"]?.jsonPrimitive?.content ?: ""
+                    event.reject(blacklist, message)
+                    ToolResult(toAgent = "Rejected join request from ${event.fromId}(${event.fromNick}) to group ${event.groupId}, blacklist=$blacklist.")
+                }
+                "ignore" -> {
+                    val blacklist = args["blacklist"]?.jsonPrimitive?.boolean ?: false
+                    event.ignore(blacklist)
+                    ToolResult(toAgent = "Ignored join request from ${event.fromId}(${event.fromNick}) to group ${event.groupId}.")
+                }
+                else -> ToolResult(toAgent = "Error: unknown action '$action'.")
+            }
+        } catch (e: Exception) {
+            ToolResult(toAgent = "Error handling member join request: ${e.message}")
+        }
+    }
+
+    private suspend fun findMemberJoinRequestEvent(eventId: Long): net.mamoe.mirai.event.events.MemberJoinRequestEvent? {
+        var found: net.mamoe.mirai.event.events.MemberJoinRequestEvent? = null
+        bot.eventChannel.subscribeAlways<net.mamoe.mirai.event.events.MemberJoinRequestEvent> {
+            if (this.eventId == eventId) found = this
+        }
+        return found
+    }
+}
+
+// ─── set_name_card ─────────────────────────────────────────
+
+class SetNameCardTool(bot: Bot) : MiraiTool(bot) {
+    override val name = "set_name_card"
+    override val description =
+        "Set a member's group name card (群名片). Requires admin or owner permission. " +
+            "Pass empty string to reset to default."
+    override val parameters: JsonObject = buildJsonObject {
+        put("type", "object")
+        putJsonObject("properties") {
+            putJsonObject("groupId") {
+                put("type", "string")
+                put("description", "The QQ group id.")
+            }
+            putJsonObject("memberId") {
+                put("type", "string")
+                put("description", "Target member QQ number.")
+            }
+            putJsonObject("nameCard") {
+                put("type", "string")
+                put("description", "New name card text (empty string to reset).")
+            }
+        }
+        put("required", buildJsonArray {
+            add(JsonPrimitive("groupId")); add(JsonPrimitive("memberId")); add(JsonPrimitive("nameCard"))
+        })
+    }
+
+    override suspend fun execute(userId: String, args: JsonObject): ToolResult {
+        val gid = args["groupId"]?.jsonPrimitive?.long
+            ?: return ToolResult(toAgent = "Error: missing 'groupId'.")
+        val mid = args["memberId"]?.jsonPrimitive?.long
+            ?: return ToolResult(toAgent = "Error: missing 'memberId'.")
+        val nameCard = args["nameCard"]?.jsonPrimitive?.content
+            ?: return ToolResult(toAgent = "Error: missing 'nameCard'.")
+
+        val group = bot.getGroup(gid) ?: return ToolResult(toAgent = "Error: group $gid not found.")
+        val member = group[mid] ?: return ToolResult(toAgent = "Error: member $mid not found in group $gid.")
+
+        return try {
+            member.nameCard = nameCard
+            val display = if (nameCard.isEmpty()) "(reset to default)" else "'$nameCard'"
+            ToolResult(toAgent = "Set name card for ${member.id}(${member.nameCardOrNick}) in group $gid to $display.")
+        } catch (e: Exception) {
+            ToolResult(toAgent = "Error setting name card: ${e.message}")
+        }
+    }
+}
+
+// ─── essence_message ───────────────────────────────────────
+
+class EssenceMessageTool(
+    bot: Bot,
+    private val sourceCache: ConcurrentHashMap<String, MessageSource>,
+) : MiraiTool(bot) {
+    override val name = "essence_message"
+    override val description =
+        "Manage group essence messages. Actions: " +
+            "'list' (list essence messages), 'add' (set a message as essence by messageRef), " +
+            "'remove' (remove from essence by messageRef)."
+    override val parameters: JsonObject = buildJsonObject {
+        put("type", "object")
+        putJsonObject("properties") {
+            putJsonObject("groupId") {
+                put("type", "string")
+                put("description", "The QQ group id.")
+            }
+            putJsonObject("action") {
+                put("type", "string")
+                put("description", "'list', 'add', or 'remove'.")
+                put("enum", buildJsonArray {
+                    add(JsonPrimitive("list")); add(JsonPrimitive("add")); add(JsonPrimitive("remove"))
+                })
+            }
+            putJsonObject("messageRef") {
+                put("type", "string")
+                put("description", "Message reference id from chat history, e.g. '#42' (for add/remove).")
+            }
+            putJsonObject("start") {
+                put("type", "integer")
+                put("description", "Start index for pagination (for list, default 0).")
+            }
+            putJsonObject("limit") {
+                put("type", "integer")
+                put("description", "Page size (for list, default 20, max 50).")
+            }
+        }
+        put("required", buildJsonArray { add(JsonPrimitive("groupId")); add(JsonPrimitive("action")) })
+    }
+
+    override suspend fun execute(userId: String, args: JsonObject): ToolResult {
+        val gid = args["groupId"]?.jsonPrimitive?.long
+            ?: return ToolResult(toAgent = "Error: missing 'groupId'.")
+        val action = args["action"]?.jsonPrimitive?.content
+            ?: return ToolResult(toAgent = "Error: missing 'action'.")
+        val group = bot.getGroup(gid) ?: return ToolResult(toAgent = "Error: group $gid not found.")
+
+        return when (action) {
+            "list" -> {
+                val start = args["start"]?.jsonPrimitive?.int ?: 0
+                val limit = (args["limit"]?.jsonPrimitive?.int ?: 20).coerceAtMost(50)
+                val records = group.essences.getPage(start, limit)
+                if (records.isEmpty()) {
+                    ToolResult(toAgent = "Group $gid has no essence messages (or page exhausted).")
+                } else {
+                    val lines = records.map { r ->
+                        val sender = r.sender?.nameCardOrNick ?: r.senderId.toString()
+                        "sender=$sender(${r.senderId}) | time=${r.senderTime} | operator=${r.operatorId}"
+                    }
+                    ToolResult(toAgent = "Group $gid essence messages (start=$start, ${lines.size} results):\n${lines.joinToString("\n")}")
+                }
+            }
+            "add" -> {
+                val ref = args["messageRef"]?.jsonPrimitive?.content?.trim()
+                    ?: return ToolResult(toAgent = "Error: missing 'messageRef'.")
+                val source = sourceCache[ref]
+                    ?: return ToolResult(toAgent = "Error: messageRef '$ref' not found in cache.")
+                val ok = group.setEssenceMessage(source)
+                if (ok) ToolResult(toAgent = "Set message $ref as essence in group $gid.")
+                else ToolResult(toAgent = "Failed to set message $ref as essence (permission denied or message not found).")
+            }
+            "remove" -> {
+                val ref = args["messageRef"]?.jsonPrimitive?.content?.trim()
+                    ?: return ToolResult(toAgent = "Error: missing 'messageRef'.")
+                val source = sourceCache[ref]
+                    ?: return ToolResult(toAgent = "Error: messageRef '$ref' not found in cache.")
+                try {
+                    group.essences.remove(source)
+                    ToolResult(toAgent = "Removed message $ref from essence in group $gid.")
+                } catch (e: Exception) {
+                    ToolResult(toAgent = "Error removing essence: ${e.message}")
+                }
+            }
+            else -> ToolResult(toAgent = "Error: unknown action '$action'.")
+        }
+    }
+}
+
+// ─── roaming_messages ──────────────────────────────────────
+
+class RoamingMessagesTool(bot: Bot) : MiraiTool(bot) {
+    override val name = "roaming_messages"
+    override val description =
+        "Query roaming (historical) messages for a friend or group. " +
+            "Pass chatType, targetId, and optional timeStart/timeEnd (epoch seconds). " +
+            "Returns message history from server."
+    override val parameters: JsonObject = buildJsonObject {
+        put("type", "object")
+        putJsonObject("properties") {
+            putJsonObject("chatType") {
+                put("type", "string")
+                put("description", "'group' or 'friend'.")
+                put("enum", buildJsonArray { add(JsonPrimitive("group")); add(JsonPrimitive("friend")) })
+            }
+            putJsonObject("targetId") {
+                put("type", "string")
+                put("description", "Group id or friend QQ number.")
+            }
+            putJsonObject("timeStart") {
+                put("type", "string")
+                put("description", "Start time in epoch seconds (default: 0 = earliest).")
+            }
+            putJsonObject("timeEnd") {
+                put("type", "string")
+                put("description", "End time in epoch seconds (default: now).")
+            }
+            putJsonObject("limit") {
+                put("type", "integer")
+                put("description", "Max messages to return (default 50, max 200).")
+            }
+        }
+        put("required", buildJsonArray { add(JsonPrimitive("chatType")); add(JsonPrimitive("targetId")) })
+    }
+
+    override suspend fun execute(userId: String, args: JsonObject): ToolResult {
+        val chatType = args["chatType"]?.jsonPrimitive?.content
+            ?: return ToolResult(toAgent = "Error: missing 'chatType'.")
+        val tid = args["targetId"]?.jsonPrimitive?.long
+            ?: return ToolResult(toAgent = "Error: missing 'targetId'.")
+        val timeStart = args["timeStart"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
+        val timeEnd = args["timeEnd"]?.jsonPrimitive?.content?.toLongOrNull() ?: Long.MAX_VALUE
+        val limit = (args["limit"]?.jsonPrimitive?.int ?: 50).coerceAtMost(200)
+
+        val roaming = when (chatType) {
+            "group" -> {
+                val group = bot.getGroup(tid) ?: return ToolResult(toAgent = "Error: group $tid not found.")
+                group.roamingMessages
+            }
+            "friend" -> {
+                val friend = bot.getFriend(tid) ?: return ToolResult(toAgent = "Error: friend $tid not found.")
+                friend.roamingMessages
+            }
+            else -> return ToolResult(toAgent = "Error: chatType must be 'group' or 'friend'.")
+        }
+
+        return try {
+            val messages = mutableListOf<String>()
+            roaming.getMessagesIn(timeStart, timeEnd).collect { chain ->
+                if (messages.size >= limit) return@collect
+                val source = chain.source
+                val senderName = source.fromId.toString()
+                val time = java.time.Instant.ofEpochSecond(source.time.toLong()).toString()
+                val text = chain.filterIsInstance<net.mamoe.mirai.message.data.PlainText>()
+                    .joinToString("") { it.content }
+                messages.add("[$time] from=$senderName: ${text.take(200)}")
+            }
+            if (messages.isEmpty()) {
+                ToolResult(toAgent = "No roaming messages found for $chatType $tid in the specified time range.")
+            } else {
+                ToolResult(toAgent = "Roaming messages for $chatType $tid (${messages.size} messages):\n${messages.joinToString("\n")}")
+            }
+        } catch (e: Exception) {
+            ToolResult(toAgent = "Error querying roaming messages: ${e.message}")
+        }
+    }
+}
+
+// ─── group_files ───────────────────────────────────────────
+
+class GroupFilesTool(bot: Bot) : MiraiTool(bot) {
+    override val name = "group_files"
+    override val description =
+        "Manage group files. Actions: " +
+            "'list' (list files in root or specified folder), " +
+            "'info' (get file details by id), " +
+            "'delete' (delete file by id), " +
+            "'rename' (rename file by id), " +
+            "'url' (get download URL by id)."
+    override val parameters: JsonObject = buildJsonObject {
+        put("type", "object")
+        putJsonObject("properties") {
+            putJsonObject("groupId") {
+                put("type", "string")
+                put("description", "The QQ group id.")
+            }
+            putJsonObject("action") {
+                put("type", "string")
+                put("description", "'list', 'info', 'delete', 'rename', or 'url'.")
+                put("enum", buildJsonArray {
+                    add(JsonPrimitive("list")); add(JsonPrimitive("info")); add(JsonPrimitive("delete"))
+                    add(JsonPrimitive("rename")); add(JsonPrimitive("url"))
+                })
+            }
+            putJsonObject("fileId") {
+                put("type", "string")
+                put("description", "File or folder id (for info/delete/rename/url).")
+            }
+            putJsonObject("folderId") {
+                put("type", "string")
+                put("description", "Folder id to list (default root '/').")
+            }
+            putJsonObject("newName") {
+                put("type", "string")
+                put("description", "New name for rename action.")
+            }
+        }
+        put("required", buildJsonArray { add(JsonPrimitive("groupId")); add(JsonPrimitive("action")) })
+    }
+
+    override suspend fun execute(userId: String, args: JsonObject): ToolResult {
+        val gid = args["groupId"]?.jsonPrimitive?.long
+            ?: return ToolResult(toAgent = "Error: missing 'groupId'.")
+        val action = args["action"]?.jsonPrimitive?.content
+            ?: return ToolResult(toAgent = "Error: missing 'action'.")
+        val group = bot.getGroup(gid) ?: return ToolResult(toAgent = "Error: group $gid not found.")
+
+        return when (action) {
+            "list" -> {
+                val folderId = args["folderId"]?.jsonPrimitive?.content ?: "/"
+                val folder = if (folderId == "/") {
+                    group.files.root
+                } else {
+                    group.files.root.resolveFolderById(folderId)
+                        ?: return ToolResult(toAgent = "Error: folder $folderId not found.")
+                }
+                val children = mutableListOf<net.mamoe.mirai.contact.file.AbsoluteFileFolder>()
+                folder.children().collect { children.add(it) }
+                if (children.isEmpty()) {
+                    ToolResult(toAgent = "Folder '${folder.name}' is empty.")
+                } else {
+                    val lines = children.map { f ->
+                        val type = if (f is net.mamoe.mirai.contact.file.AbsoluteFile) "file" else "folder"
+                        val size = if (f is net.mamoe.mirai.contact.file.AbsoluteFile) "size=${f.size}" else "contents=${(f as net.mamoe.mirai.contact.file.AbsoluteFolder).contentsCount}"
+                        "id=${f.id} | $type | ${f.name} | $size | uploader=${f.uploaderId}"
+                    }
+                    ToolResult(toAgent = "Files in '${folder.name}' (${lines.size} items):\n${lines.joinToString("\n")}")
+                }
+            }
+            "info" -> {
+                val fileId = args["fileId"]?.jsonPrimitive?.content
+                    ?: return ToolResult(toAgent = "Error: missing 'fileId'.")
+                val file = group.files.root.resolveFileById(fileId, deep = true)
+                    ?: return ToolResult(toAgent = "Error: file $fileId not found.")
+                ToolResult(
+                    toAgent = buildString {
+                        appendLine("ID: ${file.id}")
+                        appendLine("Name: ${file.name}")
+                        appendLine("Path: ${file.absolutePath}")
+                        appendLine("Size: ${file.size} bytes")
+                        appendLine("Upload time: ${java.time.Instant.ofEpochSecond(file.uploadTime)}")
+                        appendLine("Uploader: ${file.uploaderId}")
+                    }
+                )
+            }
+            "delete" -> {
+                val fileId = args["fileId"]?.jsonPrimitive?.content
+                    ?: return ToolResult(toAgent = "Error: missing 'fileId'.")
+                val file = group.files.root.resolveFileById(fileId, deep = true)
+                    ?: return ToolResult(toAgent = "Error: file $fileId not found.")
+                val ok = file.delete()
+                if (ok) ToolResult(toAgent = "Deleted file ${file.name} (${file.id}) from group $gid.")
+                else ToolResult(toAgent = "Failed to delete file ${file.id}.")
+            }
+            "rename" -> {
+                val fileId = args["fileId"]?.jsonPrimitive?.content
+                    ?: return ToolResult(toAgent = "Error: missing 'fileId'.")
+                val newName = args["newName"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+                    ?: return ToolResult(toAgent = "Error: missing 'newName'.")
+                val file = group.files.root.resolveFileById(fileId, deep = true)
+                    ?: group.files.root.resolveFolderById(fileId)
+                    ?: return ToolResult(toAgent = "Error: file/folder $fileId not found.")
+                val ok = file.renameTo(newName)
+                if (ok) ToolResult(toAgent = "Renamed to '$newName' (was '${file.name}').")
+                else ToolResult(toAgent = "Failed to rename file $fileId.")
+            }
+            "url" -> {
+                val fileId = args["fileId"]?.jsonPrimitive?.content
+                    ?: return ToolResult(toAgent = "Error: missing 'fileId'.")
+                val file = group.files.root.resolveFileById(fileId, deep = true)
+                    ?: return ToolResult(toAgent = "Error: file $fileId not found.")
+                val url = file.getUrl()
+                if (url != null) ToolResult(toAgent = "Download URL for ${file.name}: $url")
+                else ToolResult(toAgent = "Error: could not get URL for file $fileId (file may have expired).")
+            }
+            else -> ToolResult(toAgent = "Error: unknown action '$action'.")
         }
     }
 }
