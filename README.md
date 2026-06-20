@@ -132,6 +132,14 @@ src/main/kotlin/org/example/vicky/
 
 ## 快速开始
 
+从Maven依赖:
+
+```kotlin
+dependencies {
+    implementation 'io.github.zenthxsin:vicky:xxx'
+}
+```
+
 ### 1. 运行
 
 ### 1. 直接运行 JAR（推荐）**
