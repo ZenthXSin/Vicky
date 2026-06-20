@@ -54,6 +54,13 @@ interface VectorStore {
         filter: Map<String, Any>? = null,
     ): List<VectorRecord>
 
+    /** 仅加载 payload，不返回向量数据。用于只需要元数据的场景。 */
+    suspend fun scrollPayloadOnly(
+        collection: String,
+        limit: Int,
+        filter: Map<String, Any>? = null,
+    ): List<VectorRecord> = scroll(collection, limit, filter)
+
     /** 确保 collection 存在，不存在则创建。 */
     suspend fun ensureCollection(collection: String, dimension: Int)
 }

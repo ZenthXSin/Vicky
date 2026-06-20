@@ -111,8 +111,8 @@ class ContextCompactor(
         }
         if (compressEnd <= compressStart) return
 
-        val toCompress = history.subList(compressStart, compressEnd).map { it.deepCopy() }
-        val toKeepRecent = history.subList(compressEnd, history.size).map { it.deepCopy() }
+        val toCompress = history.subList(compressStart, compressEnd).toList()
+        val toKeepRecent = history.subList(compressEnd, history.size).toList()
 
         val summary = callLLMForSummary(toCompress)
 
@@ -168,12 +168,4 @@ class ContextCompactor(
         } ?: 0
         return contentLen + toolCallsLen
     }
-
-    private fun ChatMessage.deepCopy(): ChatMessage = ChatMessage(
-        role = role,
-        content = content,
-        toolCalls = toolCalls,
-        toolCallId = toolCallId,
-        name = name,
-    )
 }

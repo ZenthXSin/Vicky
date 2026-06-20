@@ -34,7 +34,10 @@ class OneBot(
     /** 当群白名单因管理员指令变更时回调，外部用来持久化到 config.json。 */
     var onGroupWhitelistChanged: ((Set<String>) -> Unit)? = null
 
-    val buffer = MessageBuffer()
+    val buffer = MessageBuffer(
+        maxGlobalEntries = agentConfig.messageBufferMaxGlobalEntries,
+        rawTruncate = agentConfig.messageBufferRawTruncate,
+    )
 
     /** 消息序号计数器，为每条消息分配唯一递增 ID。 */
     private val msgCounter = AtomicLong(0)
@@ -102,10 +105,9 @@ class OneBot(
         channel.subscribeAlways<GroupMessageEvent>(priority = EventPriority.HIGHEST) {
             val ref = "#${msgCounter.incrementAndGet()}"
             messageSourceCache[ref] = message.source
-            // 缓存上限: 保留最近 2000 条
-            while (messageSourceCache.size > 2000) {
-                val oldest = messageSourceCache.keys.firstOrNull()
-                if (oldest != null) messageSourceCache.remove(oldest)
+            if (messageSourceCache.size > 2000) {
+                val toRemove = messageSourceCache.keys.take(200)
+                toRemove.forEach { messageSourceCache.remove(it) }
             }
             val (text, richMedia) = parseMessage(message)
             buffer.store(
@@ -123,9 +125,9 @@ class OneBot(
         channel.subscribeAlways<FriendMessageEvent>(priority = EventPriority.HIGHEST) {
             val ref = "#${msgCounter.incrementAndGet()}"
             messageSourceCache[ref] = message.source
-            while (messageSourceCache.size > 2000) {
-                val oldest = messageSourceCache.keys.firstOrNull()
-                if (oldest != null) messageSourceCache.remove(oldest)
+            if (messageSourceCache.size > 2000) {
+                val toRemove = messageSourceCache.keys.take(200)
+                toRemove.forEach { messageSourceCache.remove(it) }
             }
             val (text, richMedia) = parseMessage(message)
             buffer.store(
@@ -144,9 +146,9 @@ class OneBot(
         channel.subscribeAlways<StrangerMessageEvent>(priority = EventPriority.HIGHEST) {
             val ref = "#${msgCounter.incrementAndGet()}"
             messageSourceCache[ref] = message.source
-            while (messageSourceCache.size > 2000) {
-                val oldest = messageSourceCache.keys.firstOrNull()
-                if (oldest != null) messageSourceCache.remove(oldest)
+            if (messageSourceCache.size > 2000) {
+                val toRemove = messageSourceCache.keys.take(200)
+                toRemove.forEach { messageSourceCache.remove(it) }
             }
             val (text, richMedia) = parseMessage(message)
             buffer.store(

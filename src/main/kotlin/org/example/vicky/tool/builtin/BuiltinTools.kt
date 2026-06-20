@@ -38,7 +38,6 @@ object BuiltinTools {
         distillationScheduler: DistillationScheduler? = null,
     ): List<Tool> = buildList {
         add(ClearContextTool())
-        add(ToolManagementTool())
         add(GithubTool())
         add(FileReadTool(baseDir))
         add(FileWriteTool(baseDir))

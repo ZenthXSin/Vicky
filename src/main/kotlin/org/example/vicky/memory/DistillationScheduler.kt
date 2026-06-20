@@ -42,6 +42,7 @@ class DistillationScheduler(
     fun stop() {
         job?.cancel()
         job = null
+        scope.cancel()
     }
 
     /**

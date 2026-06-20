@@ -75,7 +75,7 @@ class FileIndexService(
      * 从 Qdrant 加载已索引文件的缓存。
      */
     private suspend fun loadIndexCache() {
-        val records = vectorStore.scroll(collectionName, 10000)
+        val records = vectorStore.scrollPayloadOnly(collectionName, 10000, null)
         for (record in records) {
             val path = record.payload["path"] as? String ?: continue
             val lastModified = (record.payload["last_modified"] as? Double)?.toLong() ?: 0L
@@ -226,11 +226,7 @@ class FileIndexService(
      */
     suspend fun removeFile(relativePath: String) {
         ensureInitialized()
-        val records = vectorStore.scroll(collectionName, 10000)
-        val idsToDelete = records.filter { it.payload["path"] == relativePath }.map { it.id }
-        if (idsToDelete.isNotEmpty()) {
-            vectorStore.delete(collectionName, idsToDelete)
-        }
+        vectorStore.deleteByFilter(collectionName, mapOf("path" to relativePath))
         indexedFiles.remove(relativePath)
     }
 

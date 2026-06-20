@@ -43,35 +43,49 @@ data class RichMediaItem(
  *
  * - TTL 过期自动清理 (查询时惰性触发)。
  * - 单会话超过 [maxEntries] 条时丢弃最早的。
+ * - 全局超过 [maxGlobalEntries] 条时按 FIFO 淘汰最旧会话。
  * - 支持 unread 游标：每次查询 unread 后自动推进。
  *
  * @property ttlMs 消息存活时间，默认 1 小时。
  * @property maxEntries 单会话最大消息条数，默认 500。
+ * @property maxGlobalEntries 全局最大消息条数，默认 10000。
+ * @property rawTruncate raw 字段截断长度，默认 500。
  */
 class MessageBuffer(
     private val ttlMs: Long = 3_600_000L,
     private val maxEntries: Int = 500,
+    private val maxGlobalEntries: Int = 10000,
+    private val rawTruncate: Int = 500,
 ) {
     private val buffers = ConcurrentHashMap<String, MutableList<BufferedMessage>>()
     private val cursors = ConcurrentHashMap<String, Long>()
 
     /** 存入一条消息。 */
     fun store(conversationId: String, message: BufferedMessage) {
+        val truncatedRaw = if (rawTruncate > 0 && message.raw.length > rawTruncate) {
+            message.raw.take(rawTruncate)
+        } else {
+            message.raw
+        }
+        val truncated = if (truncatedRaw !== message.raw) message.copy(raw = truncatedRaw) else message
+
         val list = buffers.getOrPut(conversationId) { mutableListOf() }
         synchronized(list) {
-            list.add(message)
+            // 存入时清理过期消息
+            val cutoff = System.currentTimeMillis() - ttlMs
+            list.removeAll { it.timestamp < cutoff }
+            list.add(truncated)
             // 超过上限，丢弃最早的
             while (list.size > maxEntries) list.removeAt(0)
         }
+        // 全局清理
+        evictIfNeeded()
     }
 
-    /** 获取未过期的消息列表 (惰性清理 + 游标过滤)。 */
+    /** 获取未过期的消息列表 (游标过滤)。 */
     private fun getValid(conversationId: String, since: Long = 0L): List<BufferedMessage> {
         val list = buffers[conversationId] ?: return emptyList()
-        val cutoff = System.currentTimeMillis() - ttlMs
         synchronized(list) {
-            // 惰性清理过期
-            list.removeAll { it.timestamp < cutoff }
             return list.filter { it.timestamp > since }
         }
     }
@@ -108,4 +122,19 @@ class MessageBuffer(
     /** 指定会话当前缓冲的消息条数。 */
     fun size(conversationId: String): Int =
         buffers[conversationId]?.size ?: 0
+
+    private fun totalEntries(): Int = buffers.values.sumOf { it.size }
+
+    private fun evictIfNeeded() {
+        if (totalEntries() <= maxGlobalEntries) return
+        // 按最旧消息时间排序，淘汰最旧的会话
+        val sorted = buffers.entries.sortedBy { entry ->
+            entry.value.minOfOrNull { it.timestamp } ?: 0L
+        }
+        for (entry in sorted) {
+            if (totalEntries() <= maxGlobalEntries) break
+            buffers.remove(entry.key)
+            cursors.remove(entry.key)
+        }
+    }
 }

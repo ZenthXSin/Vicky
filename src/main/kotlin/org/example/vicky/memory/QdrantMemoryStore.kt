@@ -193,9 +193,10 @@ class QdrantMemoryStore(
             if (userId != null) {
                 put("user_id", userId)
             }
+            put("distilled", false)
         }
-        val records = vectorStore.scroll(rawCollectionName, 1000, filter.ifEmpty { null })
-        return records.filter { it.payload["distilled"] == false }.map { record ->
+        val records = vectorStore.scrollPayloadOnly(rawCollectionName, 1000, if (filter.isEmpty()) null else filter)
+        return records.map { record ->
             val payload = record.payload
             RawMemory(
                 id = record.id,
@@ -212,16 +213,25 @@ class QdrantMemoryStore(
 
     override suspend fun markAsDistilled(ids: List<String>) {
         ensureInitialized()
-        for (id in ids) {
-            val records = vectorStore.scroll(rawCollectionName, 1)
-            val record = records.find { it.id == id } ?: continue
+        if (ids.isEmpty()) return
+        val idSet = ids.toSet()
+        // 批量获取所有需要标记的记录（一次 HTTP 调用）
+        val records = vectorStore.scrollPayloadOnly(rawCollectionName, idSet.size + 100, null)
+        val toUpdate = records.filter { it.id in idSet }.map { record ->
             val updatedPayload = record.payload.toMutableMap()
             updatedPayload["distilled"] = true
-            vectorStore.upsert(
-                rawCollectionName,
-                listOf(VectorRecord(id, record.vector, updatedPayload))
-            )
+            // 需要原始向量来 upsert，回退到 scroll 获取
+            VectorRecord(record.id, record.vector, updatedPayload)
         }
+        if (toUpdate.isEmpty()) return
+        // 对于需要向量的 upsert，获取完整记录
+        val fullRecords = vectorStore.scroll(rawCollectionName, toUpdate.size + 100)
+        val idToVector = fullRecords.associate { it.id to it.vector }
+        val finalUpdate = toUpdate.map { rec ->
+            val vector = idToVector[rec.id] ?: rec.vector
+            VectorRecord(rec.id, vector, rec.payload)
+        }
+        vectorStore.upsert(rawCollectionName, finalUpdate)
     }
 
     override suspend fun cleanup() {
@@ -231,8 +241,8 @@ class QdrantMemoryStore(
         val distilledRetentionDays = 7L
         val expiryDays = 90L
 
-        // 清理已蒸馏的原始记忆（保留 7 天）
-        val allRaw = vectorStore.scroll(rawCollectionName, 10000)
+        // 清理已蒸馏的原始记忆（保留 7 天）— 仅加载 payload，不加载向量
+        val allRaw = vectorStore.scrollPayloadOnly(rawCollectionName, 10000, null)
         val rawToDelete = allRaw.filter { record ->
             val distilled = record.payload["distilled"] as? Boolean ?: false
             val timestamp = (record.payload["timestamp"] as? Double)?.toLong() ?: 0L
@@ -255,7 +265,7 @@ class QdrantMemoryStore(
         }
 
         // 清理过期的蒸馏记忆（保留 90 天）
-        val allMemories = vectorStore.scroll(collectionName, 10000)
+        val allMemories = vectorStore.scrollPayloadOnly(collectionName, 10000, null)
         val memoriesToDelete = allMemories.filter { record ->
             val createdAt = (record.payload["created_at"] as? Double)?.toLong() ?: 0L
             val age = ChronoUnit.DAYS.between(Instant.ofEpochMilli(createdAt), now)
@@ -268,12 +278,7 @@ class QdrantMemoryStore(
 
     override suspend fun getUserMemoryCount(userId: String): Int {
         ensureInitialized()
-        val results = vectorStore.search(
-            collectionName,
-            floatArrayOf(),
-            1000,
-            mapOf("user_id" to userId)
-        )
-        return results.size
+        val records = vectorStore.scrollPayloadOnly(collectionName, 1000, mapOf("user_id" to userId))
+        return records.size
     }
 }

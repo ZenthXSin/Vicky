@@ -1,10 +1,11 @@
 .gradle
-build/
+build
 !gradle/wrapper/gradle-wrapper.jar
 !**/src/main/**/build/
 !**/src/test/**/build/
 /other
 /config
+src/main/vicky-ksp/build/
 
 ### IntelliJ IDEA ###
 .idea/modules.xml
@@ -48,3 +49,4 @@ bin/
 
 ### Mac OS ###
 .DS_Store
+/src/main/vicky-ksp/build/kotlin/compileKotlin/cacheable/caches-jvm/jvm/kotlin/class-attributes.tab

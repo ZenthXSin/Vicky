@@ -10,6 +10,8 @@ import com.aallam.openai.api.chat.ToolType
 import com.aallam.openai.client.OpenAI
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import org.example.vicky.context.ContextBuilder
@@ -31,6 +33,8 @@ import org.example.vicky.tool.ToolContext
 import org.example.vicky.tool.ToolRegistry
 import org.example.vicky.tool.ToolResult
 import org.example.vicky.tool.builtin.BuiltinTools
+import org.example.vicky.tool.builtin.ToolManagementTool
+import org.example.vicky.config.ConfigManager
 import org.example.vicky.vector.QdrantVectorStore
 import com.aallam.openai.api.chat.Tool as OAITool
 
@@ -42,10 +46,16 @@ abstract class Agent(
     protected val config: AgentConfig,
     private val openAi: OpenAI = OpenAiClientFactory.create(config),
     protected val contextBuilder: ContextBuilder = ContextBuilder(config.agentMd),
-    protected val store: ConversationStore = ConversationStore(),
-) {
+    protected val store: ConversationStore = ConversationStore(
+        maxConversations = config.conversationStoreMaxConversations,
+        maxMessages = config.conversationStoreMaxMessages,
+    ),
+) : AutoCloseable {
     val tools: ToolRegistry = ToolRegistry()
     private val compactor = ContextCompactor(config, openAi)
+    private lateinit var toolManagementTool: ToolManagementTool
+    private var cachedOaiTools: List<OAITool>? = null
+    private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
     // 向量存储组件（Qdrant 不可用时自动禁用记忆功能）
     private val vectorStore: QdrantVectorStore? = run {
@@ -103,12 +113,18 @@ abstract class Agent(
         if (config.builtinTools) {
             val baseDir = java.io.File(System.getProperty("user.dir"))
             BuiltinTools.all(baseDir, memoryStore, fileIndexService, distillationScheduler).forEach { tools.register(it) }
+            toolManagementTool = ToolManagementTool { persistToolStates() }
+            tools.register(toolManagementTool)
+            for ((toolName, enabled) in config.toolStates) {
+                if (!enabled) tools.unregister(toolName)
+            }
+            cachedOaiTools = null
         }
 
         // 启动时后台自动索引文件（不阻塞主线程）
         if (fileIndexService != null && config.fileIndexAutoIndexOnStart) {
             println("[Vicky] 开始后台索引文件...")
-            CoroutineScope(Dispatchers.IO).launch {
+            scope.launch(Dispatchers.IO) {
                 try {
                     val result = fileIndexService.indexAll { current, success, skipped ->
                         print("\r[Vicky] 索引中: 已处理 $current 个文件，$success 个已索引，$skipped 个已跳过")
@@ -137,8 +153,24 @@ abstract class Agent(
     protected open val buffer: org.example.vicky.channel.onebot.MessageBuffer? = null
 
     /** 运行时注册工具。 */
-    fun registerTool(tool: Tool) = tools.register(tool)
-    fun unregisterTool(name: String): Tool? = tools.unregister(name)
+    fun registerTool(tool: Tool) {
+        tools.register(tool)
+        cachedOaiTools = null
+    }
+
+    fun unregisterTool(name: String): Tool? {
+        val result = tools.unregister(name)
+        if (result != null) cachedOaiTools = null
+        return result
+    }
+
+    private fun persistToolStates() {
+        val activeStates = tools.snapshot().filter { it.name != "manage_tools" }.map { it.name to true }
+        val disabledStates = toolManagementTool.getDisabledToolNames().map { it to false }
+        val allStates = (activeStates + disabledStates).toMap()
+        val configData = ConfigManager.loadOrCreate().config
+        ConfigManager.save(configData.copy(toolStates = allStates))
+    }
 
     /**
      * 入口：外部把收到的消息丢进来。
@@ -303,6 +335,8 @@ abstract class Agent(
             if (clearContextAfter) {
                 store.clear(msg.conversationId)
                 log("cleared context for '${msg.conversationId}' after reply")
+            } else {
+                store.trimIfNeeded(msg.conversationId)
             }
         }
     }
@@ -352,15 +386,26 @@ abstract class Agent(
         }
     }
 
-    private fun buildOpenAiTools(): List<OAITool> = tools.snapshot().map { t ->
-        OAITool(
-            type = ToolType.Function,
-            function = FunctionTool(
-                name = t.name,
-                description = t.description,
-                parameters = Parameters.fromJsonString(Json.encodeToString(kotlinx.serialization.json.JsonObject.serializer(), t.parameters)),
-            ),
-        )
+    private fun buildOpenAiTools(): List<OAITool> {
+        cachedOaiTools?.let { return it }
+        val result = tools.snapshot().map { t ->
+            OAITool(
+                type = ToolType.Function,
+                function = FunctionTool(
+                    name = t.name,
+                    description = t.description,
+                    parameters = Parameters.fromJsonString(Json.encodeToString(kotlinx.serialization.json.JsonObject.serializer(), t.parameters)),
+                ),
+            )
+        }
+        cachedOaiTools = result
+        return result
+    }
+
+    override fun close() {
+        distillationScheduler?.stop()
+        scope.cancel()
+        vectorStore?.close()
     }
 
     private companion object {

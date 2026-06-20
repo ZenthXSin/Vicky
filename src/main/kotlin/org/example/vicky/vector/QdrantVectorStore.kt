@@ -190,6 +190,36 @@ class QdrantVectorStore(
         }
     }
 
+    /** 仅加载 payload，不返回向量数据。用于只需要元数据的场景（cleanup、缓存加载等）。 */
+    override suspend fun scrollPayloadOnly(
+        collection: String,
+        limit: Int,
+        filter: Map<String, Any>?,
+    ): List<VectorRecord> {
+        return withContext(Dispatchers.IO) {
+            val body = buildJsonObject {
+                put("limit", limit)
+                put("with_vectors", false)
+                filter?.let { put("filter", buildFilterJson(it)) }
+            }
+            val response = client.post("$baseUrl/collections/$collection/points/scroll") {
+                contentType(ContentType.Application.Json)
+                setBody(body.toString())
+            }
+            val result = json.parseToJsonElement(response.body<String>()).jsonObject
+            val resultObj = result["result"]?.jsonObject
+            val resultPoints = resultObj?.get("points")?.jsonArray ?: return@withContext emptyList()
+            resultPoints.map { element ->
+                val obj = element.jsonObject
+                VectorRecord(
+                    id = obj["id"]?.jsonPrimitive?.content ?: "",
+                    vector = floatArrayOf(),
+                    payload = obj["payload"]?.jsonObject?.mapValues { (_, v) -> fromJsonElement(v) } ?: emptyMap(),
+                )
+            }
+        }
+    }
+
     override suspend fun ensureCollection(collection: String, dimension: Int) {
         withContext(Dispatchers.IO) {
             // 检查 collection 是否存在

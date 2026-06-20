@@ -22,6 +22,7 @@ data class ConfigData(
     val debug: Boolean = false,
     val think: Boolean = false,
     val builtinTools: Boolean = true,
+    val toolStates: Map<String, Boolean> = emptyMap(),
     val embedding: EmbeddingConfigData = EmbeddingConfigData(),
     val oneBot: OneBotConfigData = OneBotConfigData(),
     val qdrant: QdrantConfigData = QdrantConfigData(),
@@ -59,6 +60,10 @@ data class MemoryConfigData(
     val fileIndexIgnorePatterns: List<String> = listOf(".git", ".gradle", "build", "node_modules"),
     val fileIndexPaths: List<String> = emptyList(),
     val fileIndexAutoIndexOnStart: Boolean = true,
+    val conversationStoreMaxConversations: Int = 500,
+    val conversationStoreMaxMessages: Int = 200,
+    val messageBufferMaxGlobalEntries: Int = 10000,
+    val messageBufferRawTruncate: Int = 500,
 )
 
 /**
@@ -193,6 +198,7 @@ object ConfigManager {
             debug = configData.debug,
             think = configData.think,
             builtinTools = configData.builtinTools,
+            toolStates = configData.toolStates,
             embedding = toEmbeddingConfig(configData.embedding),
             qdrantHost = if (qdrant.enabled) qdrant.host else null,
             qdrantGrpcPort = qdrant.grpcPort,
@@ -218,6 +224,10 @@ object ConfigManager {
             fileIndexIgnorePatterns = memory.fileIndexIgnorePatterns,
             fileIndexPaths = memory.fileIndexPaths,
             fileIndexAutoIndexOnStart = memory.fileIndexAutoIndexOnStart,
+            conversationStoreMaxConversations = memory.conversationStoreMaxConversations,
+            conversationStoreMaxMessages = memory.conversationStoreMaxMessages,
+            messageBufferMaxGlobalEntries = memory.messageBufferMaxGlobalEntries,
+            messageBufferRawTruncate = memory.messageBufferRawTruncate,
         )
     }
 

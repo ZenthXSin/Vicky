@@ -10,7 +10,9 @@ import org.example.vicky.tool.Tool
 import org.example.vicky.tool.ToolContext
 import org.example.vicky.tool.ToolResult
 
-class ToolManagementTool : Tool() {
+class ToolManagementTool(
+    private val onStateChange: (() -> Unit)? = null,
+) : Tool() {
     override val name = "manage_tools"
     override val description =
         "List all tools and their status, or enable/disable a specific tool at runtime. " +
@@ -37,6 +39,8 @@ class ToolManagementTool : Tool() {
     }
 
     private val disabledTools = mutableMapOf<String, Tool>()
+
+    fun getDisabledToolNames(): Set<String> = disabledTools.keys.toSet()
 
     override suspend fun execute(userId: String, args: JsonObject): ToolResult =
         ToolResult(toAgent = "error: manage_tools requires context to access tool registry")
@@ -87,6 +91,7 @@ class ToolManagementTool : Tool() {
                         "error: tool '$toolName' not found in disabled tools"
                 )
             ctx.tools.register(tool)
+            onStateChange?.invoke()
             ToolResult(toAgent = "tool '$toolName' enabled successfully")
         } else {
             if (toolName == name) {
@@ -100,6 +105,7 @@ class ToolManagementTool : Tool() {
                         "error: tool '$toolName' not found"
                 )
             disabledTools[toolName] = tool
+            onStateChange?.invoke()
             ToolResult(toAgent = "tool '$toolName' disabled successfully")
         }
     }

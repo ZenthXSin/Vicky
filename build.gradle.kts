@@ -2,6 +2,7 @@ plugins {
     kotlin("jvm") version "2.3.20"
     kotlin("plugin.serialization") version "2.3.20"
     id("com.gradleup.shadow") version "9.0.0-beta12"
+    id("com.google.devtools.ksp")
     `maven-publish`
 }
 
@@ -14,14 +15,19 @@ repositories {
 
 dependencies {
     implementation("com.aallam.openai:openai-client:4.1.0")
+
     implementation("io.ktor:ktor-client-okhttp:3.0.0")
     implementation("io.ktor:ktor-client-content-negotiation:3.0.0")
     implementation("io.ktor:ktor-serialization-kotlinx-json:3.0.0")
+
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
-    implementation("ch.qos.logback:logback-classic:1.5.12")
+
+    implementation("ch.qos.logback:logback-classic:1.5.13")
 
     implementation("top.mrxiaom.mirai:overflow-core:1.1.0")
+
+    ksp(project(":src:main:vicky-ksp"))
 
     testImplementation(kotlin("test"))
 }
