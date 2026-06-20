@@ -13,6 +13,7 @@ import net.mamoe.mirai.message.data.Image.Key.queryUrl
 import net.mamoe.mirai.message.data.buildForwardMessage
 import org.example.vicky.agent.Agent
 import org.example.vicky.agent.AgentConfig
+import org.example.vicky.generated.ToolRegistry
 import org.example.vicky.io.InboundMessage
 import org.example.vicky.io.MessageSink
 import org.example.vicky.io.OutboundMessage
@@ -55,41 +56,20 @@ class OneBot(
     suspend fun connect(): Boolean {
         bot = BotBuilder.positive(url).token(token).connect() ?: return false
         agent = OneBotAgent(agentConfig, bot!!, buffer, adminList, adminToolList)
-        agent.registerTool(GetMessagesTool())
-        // Register mirai L1 tools
-        agent.registerTool(BotInfoTool(bot!!))
-        agent.registerTool(ContactsTool(bot!!))
-        agent.registerTool(GroupInfoTool(bot!!))
-        agent.registerTool(GroupMembersTool(bot!!))
-        agent.registerTool(UserProfileTool(bot!!))
-        // Register mirai L2 tools (write operations, admin-gated)
+        // Initialize MiraiToolImpl with dependencies and register all mirai tools
+        MiraiToolImpl.bot = bot!!
+        MiraiToolImpl.messageSourceCache = messageSourceCache
+        MiraiToolImpl.groupWhitelist = groupWhitelist
+        MiraiToolImpl.onGroupWhitelistChanged = {
+            onGroupWhitelistChanged?.invoke(groupWhitelist.toSet())
+        }
+        ToolRegistry.tools("mirai").forEach { agent.registerTool(it) }
+        // Register mirai L2 tool names as admin-gated
         listOf(
             "send_message", "group_manage", "friend_manage", "group_quit", "group_announcements",
             "file_write", "send_image", "send_video", "recall_message", "set_name_card",
-            "essence_message", "group_files", "group_whitelist_add"
+            "essence_message", "group_files", "group_whitelist_add", "manage_tools"
         ).forEach { adminToolList.add(it) }
-        agent.registerTool(SendMessageTool(bot!!))
-        agent.registerTool(GroupManageTool(bot!!))
-        agent.registerTool(FriendManageTool(bot!!))
-        agent.registerTool(GroupQuitTool(bot!!))
-        agent.registerTool(GroupAnnouncementsTool(bot!!))
-        // Register at & reply tools
-        agent.registerTool(AtTool(bot!!))
-        agent.registerTool(ReplyMessageTool(bot!!, messageSourceCache))
-        // Register new tools
-        agent.registerTool(RecallMessageTool(bot!!, messageSourceCache))
-        agent.registerTool(SendImageTool(bot!!))
-        agent.registerTool(SendVideoTool(bot!!))
-        agent.registerTool(FriendRequestTool(bot!!))
-        agent.registerTool(GroupInviteTool(bot!!))
-        agent.registerTool(MemberJoinRequestTool(bot!!))
-        agent.registerTool(SetNameCardTool(bot!!))
-        agent.registerTool(EssenceMessageTool(bot!!, messageSourceCache))
-        agent.registerTool(RoamingMessagesTool(bot!!))
-        agent.registerTool(GroupFilesTool(bot!!))
-        agent.registerTool(GroupWhitelistAddTool(groupWhitelist) {
-            onGroupWhitelistChanged?.invoke(groupWhitelist.toSet())
-        })
         registerListeners()
         return true
     }

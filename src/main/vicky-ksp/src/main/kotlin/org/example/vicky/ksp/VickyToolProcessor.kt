@@ -65,6 +65,9 @@ private object Gen {
     /** Tool 调用结果。 */
     val TOOL_RESULT = ClassName("org.example.vicky.tool", "ToolResult")
 
+    /** 运行时 ToolContext 类。 */
+    val TOOL_CONTEXT = ClassName("org.example.vicky.tool", "ToolContext")
+
     // 下列 MemberName 是 kotlinx.serialization.json 中的 top-level helper，
     // KotlinPoet 会按需自动 import，避免硬编码 import 列表。
     val BUILD_JSON_OBJECT = MemberName("kotlinx.serialization.json", "buildJsonObject")
@@ -103,6 +106,8 @@ private data class ParamInfo(
     val hasDefault: Boolean,
     /** 是否是 `userId: String` 这种自动注入参数（不进 args、不进 Schema）。 */
     val isUserIdInjection: Boolean,
+    /** 是否是 `ToolContext` 注入参数（不进 args、不进 Schema，直接传 ctx）。 */
+    val isToolContextInjection: Boolean,
 ) {
     /** 只要"声明了非必填"或"有 Kotlin 默认值"，就视为可选 —— 生成代码会走分支调用以保留默认值。 */
     val isOptional: Boolean get() = hasDefault || !annotatedRequired
@@ -165,6 +170,12 @@ class VickyToolProcessor(
             .addProperty(stringOverride("description", meta.description))
             .addProperty(buildParametersProperty(params))
             .addFunction(buildExecuteFun(func, parent, params))
+            .also { builder ->
+                // ToolContext 工具需要额外实现 execute(userId, args) 抽象方法
+                if (params.any { it.isToolContextInjection }) {
+                    builder.addFunction(buildUserIdFallback())
+                }
+            }
             .build()
 
         FileSpec.builder(Gen.PKG, meta.className)
@@ -226,7 +237,7 @@ class VickyToolProcessor(
         return ToolMeta(name, desc, className)
     }
 
-    /** 读单个形参的元信息；自动识别 `userId: String` 为注入参数。 */
+    /** 读单个形参的元信息；自动识别 `userId: String` 为注入参数，`ToolContext` 为上下文注入。 */
     private fun toParamInfo(param: KSValueParameter): ParamInfo? {
         val name = param.name?.asString() ?: return null
         val ktType = param.type.resolve().toTypeName()
@@ -235,6 +246,8 @@ class VickyToolProcessor(
         val required = ann?.arguments?.find { it.name?.asString() == "required" }?.value as? Boolean ?: true
         // 注入参数的判定：名字是 userId 且类型是非空 String。可空 String? 不视作注入，避免歧义。
         val isUserId = name == Gen.USER_ID && ktType.toString().removeSuffix("?") == "kotlin.String"
+        // ToolContext 注入：类型是 ToolContext（不带可空标记）
+        val isToolContext = ktType.toString() == "org.example.vicky.tool.ToolContext"
         return ParamInfo(
             name = name,
             ktType = ktType,
@@ -243,6 +256,7 @@ class VickyToolProcessor(
             annotatedRequired = required,
             hasDefault = param.hasDefault,
             isUserIdInjection = isUserId,
+            isToolContextInjection = isToolContext,
         )
     }
 
@@ -264,7 +278,7 @@ class VickyToolProcessor(
      * userId 注入参数会被跳过，因为它由框架直接提供，不需要 AI 给值。
      */
     private fun buildParametersProperty(params: List<ParamInfo>): PropertySpec {
-        val schemaParams = params.filterNot { it.isUserIdInjection }
+        val schemaParams = params.filterNot { it.isUserIdInjection || it.isToolContextInjection }
         val requiredNames = schemaParams.filter { !it.isOptional }.map { it.name }
         val code = CodeBlock.builder()
             .add("%M {\n", Gen.BUILD_JSON_OBJECT).indent()
@@ -290,18 +304,40 @@ class VickyToolProcessor(
     }
 
     /**
-     * 生成 `override suspend fun execute(userId, args): ToolResult`。
+     * 生成 `override suspend fun execute(userId, args): ToolResult` 或
+     * `override suspend fun execute(ctx, args): ToolResult`（当函数声明了 ToolContext 参数时）。
      *
-     * 函数体分三段：
-     *  1. 必填参数：`val x = args[..].jsonPrimitive.content ?: return ToolResult(error)`
-     *  2. 可选参数：`val x = args[..].jsonPrimitive.content` （nullable）
-     *  3. 调用原函数 + 返回：见 [buildCallAndReturn]
+     * 当有 ToolContext 时，同时生成 `execute(userId, args)` 抽象方法实现（抛异常），
+     * 因为 Tool 抽象类要求必须实现该方法。
      */
     private fun buildExecuteFun(
         func: KSFunctionDeclaration,
         parent: KSClassDeclaration,
         params: List<ParamInfo>,
     ): FunSpec {
+        val hasToolContext = params.any { it.isToolContextInjection }
+
+        if (hasToolContext) {
+            // 生成 execute(ctx, args) 作为主实现
+            val builder = FunSpec.builder("execute")
+                .addModifiers(KModifier.OVERRIDE, KModifier.SUSPEND)
+                .addParameter("ctx", Gen.TOOL_CONTEXT)
+                .addParameter(Gen.ARGS, JsonObject::class.asClassName())
+                .returns(Gen.TOOL_RESULT)
+
+            params.forEach { p ->
+                when {
+                    p.isToolContextInjection -> Unit
+                    p.isUserIdInjection -> Unit
+                    p.isOptional -> builder.addCode(extractOptionalParam(p))
+                    else -> builder.addCode(extractRequiredParam(p))
+                }
+            }
+            builder.addCode(buildCallAndReturn(func, parent, params))
+            return builder.build()
+        }
+
+        // 无 ToolContext：生成 execute(userId, args)
         val builder = FunSpec.builder("execute")
             .addModifiers(KModifier.OVERRIDE, KModifier.SUSPEND)
             .addParameter(Gen.USER_ID, String::class)
@@ -310,15 +346,24 @@ class VickyToolProcessor(
 
         params.forEach { p ->
             when {
-                p.isUserIdInjection -> Unit // 注入参数无需从 args 提取，直接在调用处传 userId
+                p.isUserIdInjection -> Unit
                 p.isOptional -> builder.addCode(extractOptionalParam(p))
                 else -> builder.addCode(extractRequiredParam(p))
             }
         }
-
         builder.addCode(buildCallAndReturn(func, parent, params))
         return builder.build()
     }
+
+    /** 为 ToolContext 工具生成 `execute(userId, args)` 抽象方法实现（委托或抛异常）。 */
+    private fun buildUserIdFallback(): FunSpec =
+        FunSpec.builder("execute")
+            .addModifiers(KModifier.OVERRIDE, KModifier.SUSPEND)
+            .addParameter(Gen.USER_ID, String::class)
+            .addParameter(Gen.ARGS, JsonObject::class.asClassName())
+            .returns(Gen.TOOL_RESULT)
+            .addCode("throw UnsupportedOperationException(\"This tool requires ToolContext\")\n")
+            .build()
 
     /** 必填参数：缺失即用 `?:` 提前 return 带错误信息的 ToolResult。 */
     private fun extractRequiredParam(p: ParamInfo): CodeBlock =
@@ -345,7 +390,11 @@ class VickyToolProcessor(
         val base = CodeBlock.of("%N[%S]?.%M", Gen.ARGS, p.name, Gen.JSON_PRIMITIVE)
         return when (p.jsonType) {
             "string" -> CodeBlock.of("%L?.content", base)
-            "integer" -> CodeBlock.of("%L?.content?.toIntOrNull()", base)
+            "integer" -> if (p.ktType.toString().removeSuffix("?") == "kotlin.Long") {
+                CodeBlock.of("%L?.content?.toLongOrNull()", base)
+            } else {
+                CodeBlock.of("%L?.content?.toIntOrNull()", base)
+            }
             "number" -> CodeBlock.of("%L?.content?.toDoubleOrNull()", base)
             "boolean" -> CodeBlock.of("%L?.content?.toBooleanStrictOrNull()", base)
             else -> CodeBlock.of("%L?.content", base)
@@ -424,8 +473,10 @@ class VickyToolProcessor(
         val presentSet = optionals
             .mapIndexedNotNull { idx, p -> if (presentMask[idx]) p.name else null }
             .toSet()
+        val hasToolContext = params.any { it.isToolContextInjection }
         val callArgs = params.mapNotNull { p ->
             when {
+                p.isToolContextInjection -> "${p.name} = ctx"
                 p.isUserIdInjection -> "${p.name} = ${Gen.USER_ID}"
                 p.isOptional -> if (p.name in presentSet) "${p.name} = ${p.name}" else null
                 else -> "${p.name} = ${p.name}"
