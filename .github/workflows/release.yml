@@ -12,7 +12,6 @@ on:
 
 permissions:
   contents: write
-  packages: write
 
 jobs:
   release:
@@ -75,13 +74,6 @@ jobs:
             release/Vicky-${{ steps.ver.outputs.version }}.jar
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Publish to GitHub Packages
-        run: ./gradlew publishAllPublicationsToGitHubPackagesRepository -Pversion=${{ steps.ver.outputs.version }} --no-daemon --stacktrace
-        env:
-          GITHUB_ACTOR: ${{ github.actor }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
 
       - name: Publish to Maven Central
         run: ./gradlew publishAndReleaseToMavenCentral -Pversion=${{ steps.ver.outputs.version }} --no-daemon --stacktrace
