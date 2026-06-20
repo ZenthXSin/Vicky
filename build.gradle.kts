@@ -3,10 +3,10 @@ plugins {
     kotlin("plugin.serialization") version "2.3.20"
     id("com.gradleup.shadow") version "9.0.0-beta12"
     id("com.google.devtools.ksp")
-    `maven-publish`
+    id("com.vanniktech.maven.publish") version "0.30.0"
 }
 
-group = "org.example.vicky"
+group = "io.github.zenthxsin"
 version = project.findProperty("version")?.toString() ?: "1.0-SNAPSHOT"
 
 repositories {
@@ -65,14 +65,6 @@ tasks.test {
 }
 
 publishing {
-    publications {
-        create<MavenPublication>("maven") {
-            from(components["java"])
-            groupId = project.group.toString()
-            artifactId = "vicky"
-            version = project.version.toString()
-        }
-    }
     repositories {
         maven {
             name = "GitHubPackages"
@@ -81,6 +73,38 @@ publishing {
                 username = System.getenv("GITHUB_ACTOR")
                 password = System.getenv("GITHUB_TOKEN")
             }
+        }
+    }
+}
+
+mavenPublishing {
+    publishToMavenCentral(automaticRelease = true)
+    signAllPublications()
+
+    coordinates("io.github.zenthxsin", "vicky", project.version.toString())
+
+    pom {
+        name.set("Vicky")
+        description.set("Mindustry Vicky AI agent framework with OneBot integration.")
+        url.set("https://github.com/ZenthXSin/Vicky")
+        licenses {
+            license {
+                name.set("MIT License")
+                url.set("https://opensource.org/licenses/MIT")
+                distribution.set("repo")
+            }
+        }
+        developers {
+            developer {
+                id.set("zenthxsin")
+                name.set("ZenthXSin")
+                url.set("https://github.com/ZenthXSin")
+            }
+        }
+        scm {
+            url.set("https://github.com/ZenthXSin/Vicky")
+            connection.set("scm:git:git://github.com/ZenthXSin/Vicky.git")
+            developerConnection.set("scm:git:ssh://git@github.com/ZenthXSin/Vicky.git")
         }
     }
 }
