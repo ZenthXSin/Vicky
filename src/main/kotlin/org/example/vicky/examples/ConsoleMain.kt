@@ -66,7 +66,8 @@ fun main() = runBlocking {
 
     val agent = oneBot.agent
 
-    ToolRegistry.tools("Vicky").forEach { agent.registerTool(it) }
+    //ToolRegistry.tools("Vicky").forEach { agent.registerTool(it) }
+    //ToolRegistry.tools("mindustry").forEach { agent.registerTool(it) }
 
     println("Vicky console agent. Type 'quit' to exit.")
     while (true) {
@@ -75,7 +76,7 @@ fun main() = runBlocking {
         if (line == "quit") break
         if (line.isEmpty()) continue
         agent.receive(clearContextAfter = true,
-            msg = InboundMessage(userId = "user1", content = line),
+            msg = InboundMessage(userId = "488254306", content = line),
             replySink = {
             when (it) {
                 is OutboundMessage.AgentReply -> println("[agent] ${it.content}")

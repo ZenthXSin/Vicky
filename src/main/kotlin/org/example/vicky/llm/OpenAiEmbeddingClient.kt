@@ -44,7 +44,16 @@ class OpenAiEmbeddingClient(private val config: EmbeddingConfig) : EmbeddingClie
             )
         )
         val vectors = resp.embeddings.map { it.embedding.toFloatArray() }
-        if (vectors.isNotEmpty() && dimension == -1) dimension = vectors[0].size
+        // 防御：embedding 端点协议不兼容时可能返回空响应或零长度向量，
+        // 静默写入会导致 Qdrant 存 payload 但不建向量索引，搜索全空。提前抛错好定位。
+        check(vectors.size == texts.size) {
+            "Embedding endpoint returned ${vectors.size} vectors for ${texts.size} inputs (model=${config.model}, baseUrl=${config.baseUrl}). 端点协议可能不兼容。"
+        }
+        val firstEmpty = vectors.indexOfFirst { it.isEmpty() }
+        check(firstEmpty < 0) {
+            "Embedding endpoint returned empty vector at index $firstEmpty (model=${config.model}). 端点协议可能不兼容。"
+        }
+        if (dimension == -1) dimension = vectors[0].size
         return vectors
     }
 

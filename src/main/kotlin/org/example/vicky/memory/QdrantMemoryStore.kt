@@ -20,25 +20,17 @@ class QdrantMemoryStore(
 
     private suspend fun ensureInitialized() {
         if (initialized) return
-        // 先调用一次 embed 确定维度（首次调用后 dimension 会回填）
+        // 必须先确定真实维度，再创建 collection。
+        // 旧实现失败时降级到 384，会和真实 embedding 维度不一致，导致后续写入仍然写不进向量。
         if (embeddingClient.dimension == -1) {
-            try {
-                val result = embeddingClient.embed("initialization")
-                if (result.isNotEmpty() && embeddingClient.dimension == -1) {
-                    println("[Vicky] 警告：维度初始化失败，使用默认值 384")
-                }
-            } catch (e: Exception) {
-                println("[Vicky] 警告：维度初始化失败: ${e.message}")
-            }
+            val probe = embeddingClient.embed("initialization")
+            check(probe.isNotEmpty()) { "Embedding probe returned empty vector; 无法确定向量维度。" }
         }
-        val dim = if (embeddingClient.dimension == -1) {
-            println("[Vicky] 使用默认维度 384")
-            384
-        } else {
-            embeddingClient.dimension
-        }
+        val dim = embeddingClient.dimension
+        check(dim > 0) { "Embedding dimension still unknown (=$dim); 拒绝以未知维度创建 collection。" }
         vectorStore.ensureCollection(collectionName, dim)
         vectorStore.ensureCollection(rawCollectionName, dim)
+        println("[Vicky] 向量集合已就绪（维度: $dim）")
         initialized = true
     }
 

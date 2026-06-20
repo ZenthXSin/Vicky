@@ -237,7 +237,7 @@ abstract class Agent(
                     tools = oaiTools.takeIf { it.isNotEmpty() },
                     temperature = config.temperature,
                 )
-                val assistant = openAi.chatCompletion(request).choices.first().message
+                val assistant = completeChat(request)
                 history += assistant
 
                 val calls = assistant.toolCalls.orEmpty()
@@ -288,13 +288,13 @@ abstract class Agent(
                     "report your conclusion to the user, and explicitly note that some actions may be " +
                     "incomplete because the step limit was reached. Reply in the user's language.",
             )
-            val wrapUp = openAi.chatCompletion(
+            val wrapUp = completeChat(
                 ChatCompletionRequest(
                     model = config.model,
                     messages = history.toList(),
                     temperature = config.temperature,
                 )
-            ).choices.first().message
+            )
             history += wrapUp
             assistantReply = wrapUp.content
             wrapUp.content?.takeIf { it.isNotBlank() }?.let {
@@ -327,7 +327,8 @@ abstract class Agent(
                         memoryStore.rememberRaw(raw)
                     }
                 } catch (e: Exception) {
-                    println("[Vicky] 原始记忆保存失败: ${e.message}")
+                    println("[Vicky] 原始记忆保存失败 (${e::class.simpleName}): ${e.message}")
+                    if (config.debug) e.printStackTrace()
                 }
             }
 
@@ -384,6 +385,49 @@ abstract class Agent(
         } else {
             history[0] = ChatMessage(role = ChatRole.System, content = prompt)
         }
+    }
+
+    /**
+     * 统一的 chat completion 入口：根据 [AgentConfig.streaming] 选择流式或一次性请求。
+     * 两种模式的返回值语义一致：一条完整的 assistant [ChatMessage]，含拼装好的 content 与 toolCalls。
+     */
+    private suspend fun completeChat(request: ChatCompletionRequest): ChatMessage {
+        if (!config.streaming) {
+            return openAi.chatCompletion(request).choices.first().message
+        }
+        val contentBuf = StringBuilder()
+        // toolCall 累积：index -> (id, name, argumentsBuf)
+        data class ToolCallAccum(var id: String? = null, var name: String? = null, val args: StringBuilder = StringBuilder())
+        val toolCalls = linkedMapOf<Int, ToolCallAccum>()
+        var role: ChatRole = ChatRole.Assistant
+        openAi.chatCompletions(request).collect { chunk ->
+            val choice = chunk.choices.firstOrNull() ?: return@collect
+            val delta = choice.delta ?: return@collect
+            delta.role?.let { role = it }
+            delta.content?.let { contentBuf.append(it) }
+            delta.toolCalls?.forEach { tcc ->
+                val accum = toolCalls.getOrPut(tcc.index) { ToolCallAccum() }
+                tcc.id?.let { accum.id = it.id }
+                tcc.function?.nameOrNull?.let { accum.name = it }
+                tcc.function?.argumentsOrNull?.let { accum.args.append(it) }
+            }
+        }
+        val builtToolCalls = toolCalls.values
+            .filter { !it.id.isNullOrBlank() && !it.name.isNullOrBlank() }
+            .map { acc ->
+                ToolCall.Function(
+                    id = com.aallam.openai.api.chat.ToolId(acc.id!!),
+                    function = com.aallam.openai.api.chat.FunctionCall(
+                        nameOrNull = acc.name,
+                        argumentsOrNull = acc.args.toString(),
+                    ),
+                )
+            }
+        return ChatMessage(
+            role = role,
+            content = contentBuf.toString().ifEmpty { null },
+            toolCalls = builtToolCalls.ifEmpty { null },
+        )
     }
 
     private fun buildOpenAiTools(): List<OAITool> {

@@ -52,6 +52,13 @@ class QdrantVectorStore(
 
     private suspend fun upsertBatch(collection: String, records: List<VectorRecord>) {
         withContext(Dispatchers.IO) {
+            // 防御：空向量会被 Qdrant 接受成纯 payload 点，搜索时永远找不到，故提前拒绝。
+            val badIdx = records.indexOfFirst { it.vector.isEmpty() }
+            if (badIdx >= 0) {
+                throw IllegalArgumentException(
+                    "Refusing to upsert record with empty vector (collection=$collection, id=${records[badIdx].id}). embedding 调用可能失败了。"
+                )
+            }
             val points = records.map { record ->
                 buildJsonObject {
                     put("id", record.id)
@@ -75,17 +82,17 @@ class QdrantVectorStore(
                         contentType(ContentType.Application.Json)
                         setBody(body.toString())
                     }
-                    response.body<String>()  // 消费响应体以释放连接
+                    // 只读一次 body：ktor 不允许重复消费同一响应体。
+                    val responseBody = response.body<String>()
                     if (response.status.isSuccess()) {
                         return@withContext
                     }
-                    val errorMsg = response.body<String>()
                     if (attempt < maxRetries - 1) {
                         val delayMs = (attempt + 1) * 1000L
                         println("[Vicky] Qdrant upsert 失败 (${response.status})，${delayMs}ms 后重试 (${attempt + 1}/$maxRetries)...")
                         delay(delayMs)
                     } else {
-                        throw RuntimeException("Qdrant upsert failed after $maxRetries attempts: ${response.status} - $errorMsg")
+                        throw RuntimeException("Qdrant upsert failed after $maxRetries attempts: ${response.status} - $responseBody")
                     }
                 } catch (e: Exception) {
                     lastException = e

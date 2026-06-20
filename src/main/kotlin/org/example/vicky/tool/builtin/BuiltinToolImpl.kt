@@ -228,6 +228,95 @@ object BuiltinToolImpl {
         return ToolResult(toAgent = "Found ${results.size} matching results:\n$result")
     }
 
+    // ─── web_download_file ────────────────────────────────────
+
+    @VickyTool(name = "web_download_file", description = "Download a file from an http(s) URL into the local config/tmp directory. Max 100 MB. Use this for any URL surfaced via get_messages type=media.")
+    suspend fun webDownloadFile(
+        @ToolParam(description = "Full http or https URL.") url: String,
+        @ToolParam(description = "Save filename (relative to config/tmp). Default = filename from URL or 'download.bin'.", required = false) savePath: String = "",
+    ): ToolResult {
+        if (!(url.startsWith("http://") || url.startsWith("https://"))) {
+            return ToolResult(toAgent = "Error: only http(s) URLs allowed.")
+        }
+        val tmp = org.example.vicky.tool.file.ensureTmpDir()
+        val defaultName = url.substringAfterLast('/').substringBefore('?').ifBlank { "download.bin" }
+        return org.example.vicky.tool.file.saveToTmp(tmp, url, null, defaultName, savePath).fold(
+            onSuccess = { saved ->
+                val rel = saved.relativeTo(tmp).path.replace(File.separatorChar, '/')
+                ToolResult(toAgent = "Downloaded $url -> config/tmp/$rel (${saved.length()} bytes). 可用 file_read 读取.")
+            },
+            onFailure = { ToolResult(toAgent = "Error: ${it.message}") },
+        )
+    }
+
+    // ─── file_extract ─────────────────────────────────────────
+
+    @VickyTool(name = "file_extract", description = "Extract a .zip/.jar archive into a directory under the working dir. Default target = config/tmp/<archive-name-without-ext>. Max total uncompressed 100 MB. Zip Slip protection enforced.")
+    suspend fun fileExtract(
+        @ToolParam(description = "Archive path, relative to working dir (e.g. 'config/tmp/foo.zip').") archivePath: String,
+        @ToolParam(description = "Target directory (relative to working dir). Default = same folder as archive, subdir named after archive basename.", required = false) targetDir: String = "",
+    ): ToolResult = kotlinx.coroutines.withContext(Dispatchers.IO) {
+        val archive = safePath(baseDir, archivePath.trim())
+            ?: return@withContext ToolResult(toAgent = "Error: archive path '$archivePath' is outside the allowed directory.")
+        if (!archive.exists() || archive.isDirectory) return@withContext ToolResult(toAgent = "Error: archive '$archivePath' not found.")
+        val name = archive.name.lowercase()
+        if (!(name.endsWith(".zip") || name.endsWith(".jar"))) {
+            return@withContext ToolResult(toAgent = "Error: only .zip/.jar are supported (got '${archive.name}').")
+        }
+
+        val effectiveTargetRel = targetDir.ifBlank {
+            val parentRel = archive.parentFile.relativeTo(baseDir).path.replace(File.separatorChar, '/')
+            val stem = archive.nameWithoutExtension
+            if (parentRel.isEmpty()) stem else "$parentRel/$stem"
+        }
+        val target = safePath(baseDir, effectiveTargetRel)
+            ?: return@withContext ToolResult(toAgent = "Error: target '$effectiveTargetRel' is outside the allowed directory.")
+        target.mkdirs()
+        val targetCanonical = target.canonicalFile
+
+        var totalBytes = 0L
+        var files = 0
+        var dirs = 0
+        try {
+            java.util.zip.ZipFile(archive).use { zip ->
+                val entries = zip.entries()
+                while (entries.hasMoreElements()) {
+                    val entry = entries.nextElement()
+                    val resolved = File(targetCanonical, entry.name).canonicalFile
+                    if (!resolved.path.startsWith(targetCanonical.path + File.separator) &&
+                        resolved.path != targetCanonical.path
+                    ) {
+                        return@withContext ToolResult(toAgent = "Error: zip entry '${entry.name}' escapes target dir (Zip Slip).")
+                    }
+                    if (entry.isDirectory) {
+                        resolved.mkdirs(); dirs++; continue
+                    }
+                    resolved.parentFile?.mkdirs()
+                    zip.getInputStream(entry).use { input ->
+                        resolved.outputStream().use { output ->
+                            val buf = ByteArray(64 * 1024)
+                            while (true) {
+                                val n = input.read(buf)
+                                if (n < 0) break
+                                totalBytes += n
+                                if (totalBytes > org.example.vicky.tool.file.MAX_DOWNLOAD_BYTES) {
+                                    output.close()
+                                    target.deleteRecursively()
+                                    return@withContext ToolResult(toAgent = "Error: uncompressed size exceeded ${org.example.vicky.tool.file.MAX_DOWNLOAD_BYTES} bytes; aborted.")
+                                }
+                                output.write(buf, 0, n)
+                            }
+                        }
+                    }
+                    files++
+                }
+            }
+        } catch (e: Exception) {
+            return@withContext ToolResult(toAgent = "Error extracting '$archivePath': ${e.message}")
+        }
+        ToolResult(toAgent = "Extracted '$archivePath' -> '$effectiveTargetRel' ($files files, $dirs dirs, $totalBytes bytes uncompressed).")
+    }
+
     // ─── file_index ───────────────────────────────────────────
 
     @VickyTool(name = "file_index", description = "Trigger background incremental indexing of files under the working directory. Returns immediately; progress is logged.")

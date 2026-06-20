@@ -18,13 +18,16 @@ import com.aallam.openai.api.model.ModelId
  * @property maxContextLength 上下文总字符数上限。超过该阈值时触发 LLM 摘要压缩，
  *                           将旧消息合并为一段摘要后再继续对话。
  *                           设为 `0` 表示不启用基于长度的摘要压缩。
+ *                           [think] 打开时此项被忽略，上下文不做压缩，便于完整观察思考链。
  * @property mode 运行模式：[AgentMode.SILENT]（模式 1，静默）或 [AgentMode.VERBOSE]（模式 2，详尽输出）。
  * @property temperature 采样温度，透传给 chat completion。
  *                        设为 `null` 表示使用服务端默认值；值越大输出越发散，越小越确定。
  * @property agentMd 基础系统提示文本（人设 / 指令），以字符串内联方式提供，不再从文件读取。
  * @property debug 是否开启框架运行日志（每轮推理、工具调用）及底层 HTTP 日志。
  * @property think 是否将 Agent 每轮的中间思考文本（调用工具前的 content）输出到日志。
- *                 仅在 [debug] 或独立排查场景下有意义。
+ *                 打开后同时关闭基于 [maxContextLength] 的上下文压缩。
+ * @property streaming LLM 请求模式。`true` 走流式（`chatCompletions`），`false` 走一次性（`chatCompletion`）。
+ *                      默认 `true`：连接更稳，长响应不易卡死；语义上与非流式等价（框架在 chunk 收齐后再拼装为一条 ChatMessage 供下游使用）。
  * @property builtinTools 是否注册框架内置工具集。设为 `false` 时 Agent 仅依赖外部注入的工具。
  * @property embedding 语义向量模型配置，用于记忆与文件索引的向量化。
  *                      设为 `null` 表示未启用语义能力，此时长期记忆与文件索引均不可用。
@@ -42,6 +45,7 @@ data class AgentConfig(
     val agentMd: String = "You are a helpful assistant.",
     val debug: Boolean = false,
     val think: Boolean = false,
+    val streaming: Boolean = true,
     val builtinTools: Boolean = true,
     val toolStates: Map<String, Boolean> = emptyMap(),
     val embedding: EmbeddingConfig? = null,
@@ -66,7 +70,7 @@ data class AgentConfig(
     val fileIndexCollection: String = "vicky_files",
     val fileIndexChunkSize: Int = 500,
     val fileIndexChunkOverlap: Int = 50,
-    val fileIndexIgnorePatterns: List<String> = listOf(".git", ".gradle", "build", "node_modules"),
+    val fileIndexIgnorePatterns: List<String> = listOf(".git", ".gradle", "build", "node_modules", "config/tmp"),
     val fileIndexPaths: List<String> = emptyList(),
     val fileIndexAutoIndexOnStart: Boolean = true,
     // 会话存储限制

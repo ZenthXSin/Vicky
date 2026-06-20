@@ -66,7 +66,7 @@ class ContextCompactor(
         if (config.maxMemoryRounds > 0) {
             trimMemoryRounds(history)
         }
-        if (config.maxContextLength > 0) {
+        if (config.maxContextLength > 0 && !config.think) {
             compressToContextBudget(history)
         }
     }

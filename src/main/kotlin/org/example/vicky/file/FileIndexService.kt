@@ -303,8 +303,11 @@ class FileIndexService(
     private fun isIgnored(file: File): Boolean {
         val path = file.absolutePath
         return ignorePatterns.any { pattern ->
-            path.contains(File.separator + pattern + File.separator) ||
-                path.endsWith(File.separator + pattern)
+            val norm = if (pattern.contains('/') || pattern.contains('\\')) {
+                pattern.replace('/', File.separatorChar).replace('\\', File.separatorChar)
+            } else pattern
+            path.contains(File.separator + norm + File.separator) ||
+                path.endsWith(File.separator + norm)
         }
     }
 

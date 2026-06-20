@@ -21,6 +21,7 @@ data class ConfigData(
     val agentMd: String = "AGENT.md",
     val debug: Boolean = false,
     val think: Boolean = false,
+    val streaming: Boolean = true,
     val builtinTools: Boolean = true,
     val toolStates: Map<String, Boolean> = emptyMap(),
     val embedding: EmbeddingConfigData = EmbeddingConfigData(),
@@ -57,7 +58,7 @@ data class MemoryConfigData(
     val fileIndexCollection: String = "vicky_files",
     val fileIndexChunkSize: Int = 500,
     val fileIndexChunkOverlap: Int = 50,
-    val fileIndexIgnorePatterns: List<String> = listOf(".git", ".gradle", "build", "node_modules"),
+    val fileIndexIgnorePatterns: List<String> = listOf(".git", ".gradle", "build", "node_modules", "config/tmp"),
     val fileIndexPaths: List<String> = emptyList(),
     val fileIndexAutoIndexOnStart: Boolean = true,
     val conversationStoreMaxConversations: Int = 500,
@@ -121,7 +122,9 @@ object ConfigManager {
             return LoadResult(config, md, firstRun = true)
         }
 
-        val configData = json.decodeFromString<ConfigData>(configFile.readText(Charsets.UTF_8))
+        val rawConfig = json.decodeFromString<ConfigData>(configFile.readText(Charsets.UTF_8))
+        val configData = migrate(rawConfig)
+        if (configData !== rawConfig) save(configData)
 
         val agentMdFile = File(configDir, configData.agentMd)
         val agentMdContent = if (agentMdFile.exists()) {
@@ -131,6 +134,18 @@ object ConfigManager {
         }
 
         return LoadResult(configData, agentMdContent, firstRun = false)
+    }
+
+    /** 老配置幂等迁移：保证关键字段不缺。 */
+    private fun migrate(config: ConfigData): ConfigData {
+        val mem = config.memory
+        val needTmpIgnore = "config/tmp" !in mem.fileIndexIgnorePatterns
+        if (!needTmpIgnore) return config
+        return config.copy(
+            memory = mem.copy(
+                fileIndexIgnorePatterns = mem.fileIndexIgnorePatterns + "config/tmp",
+            ),
+        )
     }
 
     fun save(config: ConfigData) {
@@ -197,6 +212,7 @@ object ConfigManager {
             agentMd = agentMdContent,
             debug = configData.debug,
             think = configData.think,
+            streaming = configData.streaming,
             builtinTools = configData.builtinTools,
             toolStates = configData.toolStates,
             embedding = toEmbeddingConfig(configData.embedding),
