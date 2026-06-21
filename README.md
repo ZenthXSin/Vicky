@@ -2,6 +2,12 @@
 
 ![未奇(AI生成)](src/main/resources/vicky.png)
 
+[![Maven Central](https://img.shields.io/maven-central/v/io.github.zenthxsin/vicky)](https://central.sonatype.com/artifact/io.github.zenthxsin/vicky)
+[![Release](https://img.shields.io/github/v/release/zenthxsin/vicky)](https://github.com/zenthxsin/vicky/releases)
+[![License](https://img.shields.io/github/license/zenthxsin/vicky)](https://github.com/zenthxsin/vicky/blob/main/LICENSE)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/zenthxsin/vicky/release.yml?branch=main)](https://github.com/zenthxsin/vicky/actions)
+[![Java](https://img.shields.io/badge/Java-17%2B-orange)](https://www.oracle.com/java/)
+
 灵感来源于**SCP: 4K**中**黑洞纪元**的舰载**人工智能** -- **未奇**
 
 一个精简、易维护的 Kotlin Agent 框架，对接 **OpenAI 通用协议**（兼容任意 OpenAI 协议端点：OpenAI / DeepSeek / one-api / 本地推理服务等）。
@@ -131,6 +137,14 @@ src/main/kotlin/org/example/vicky/
 ```
 
 ## 快速开始
+
+从Maven依赖:
+
+```kotlin
+dependencies {
+    implementation 'io.github.zenthxsin:vicky:xxx'
+}
+```
 
 ### 1. 运行
 
