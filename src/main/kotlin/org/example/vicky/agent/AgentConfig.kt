@@ -79,4 +79,6 @@ data class AgentConfig(
     // 消息缓冲区限制
     val messageBufferMaxGlobalEntries: Int = 10000,
     val messageBufferRawTruncate: Int = 500,
+    val name: String? = null,
+    val id: String = java.util.UUID.randomUUID().toString(),
 )

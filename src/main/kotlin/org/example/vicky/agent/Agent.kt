@@ -52,6 +52,8 @@ abstract class Agent(
     ),
 ) : AutoCloseable {
     val tools: ToolRegistry = ToolRegistry()
+    val id: String get() = config.id
+    val name: String? get() = config.name
     private val compactor = ContextCompactor(config, openAi)
     private lateinit var toolManagementTool: ToolManagementTool
     private var cachedOaiTools: List<OAITool>? = null
@@ -98,6 +100,7 @@ abstract class Agent(
     } else null
 
     init {
+        AgentManager.register(this)
         // 打印向量存储初始化状态
         if (embeddingClient != null) {
             val dimText = if (embeddingClient.dimension > 0) "维度: ${embeddingClient.dimension}" else "维度: 待首次调用确定"
@@ -237,7 +240,7 @@ abstract class Agent(
                     tools = oaiTools.takeIf { it.isNotEmpty() },
                     temperature = config.temperature,
                 )
-                val assistant = completeChat(request)
+                val assistant = completeChat(request, onDebug = if (config.debug) { s -> log(s) } else null)
                 history += assistant
 
                 val calls = assistant.toolCalls.orEmpty()
@@ -260,7 +263,17 @@ abstract class Agent(
                     val toolName = call.function.name
                     logThink("Use Tool: $toolName")
                     log("step ${step + 1}: invoking tool '$toolName'")
-                    val result = invokeTool(msg, toolName, call.function.argumentsAsJson())
+                    val rawArgs = call.function.argumentsOrNull.orEmpty()
+                    val parsedArgs = runCatching { call.function.argumentsAsJson() }
+                        .getOrElse { e ->
+                            log("step ${step + 1}: arguments parse failed for '$toolName' (raw=${rawArgs.take(200)}): ${e.message}")
+                            kotlinx.serialization.json.JsonObject(emptyMap())
+                        }
+                    val result = runCatching { invokeTool(msg, toolName, parsedArgs) }
+                        .getOrElse { e ->
+                            log("step ${step + 1}: tool '$toolName' threw: ${e.message}")
+                            ToolResult(toAgent = "Error executing '$toolName': ${e.message}")
+                        }
                     history += ChatMessage(
                         role = ChatRole.Tool,
                         toolCallId = call.id,
@@ -293,12 +306,24 @@ abstract class Agent(
                     model = config.model,
                     messages = history.toList(),
                     temperature = config.temperature,
-                )
+                ),
+                onDebug = if (config.debug) { s -> log(s) } else null,
             )
             history += wrapUp
             assistantReply = wrapUp.content
             wrapUp.content?.takeIf { it.isNotBlank() }?.let {
                 emit(OutboundMessage.AgentReply(msg.conversationId, msg.userId, msg.groupId, it))
+            }
+        } catch (e: Throwable) {
+            log("receive() failed: ${e::class.simpleName}: ${e.message}")
+            if (config.debug) e.printStackTrace()
+            runCatching {
+                emit(
+                    OutboundMessage.AgentReply(
+                        msg.conversationId, msg.userId, msg.groupId,
+                        "[内部错误] ${e::class.simpleName}: ${e.message ?: "unknown"}",
+                    )
+                )
             }
         } finally {
             // 无论如何都保存原始记忆
@@ -319,7 +344,7 @@ abstract class Agent(
                                 userId = msg.userId,
                                 conversationId = msg.conversationId,
                                 role = "assistant",
-                                content = assistantReply!!,
+                                content = assistantReply,
                             )
                         )
                     }
@@ -391,7 +416,10 @@ abstract class Agent(
      * 统一的 chat completion 入口：根据 [AgentConfig.streaming] 选择流式或一次性请求。
      * 两种模式的返回值语义一致：一条完整的 assistant [ChatMessage]，含拼装好的 content 与 toolCalls。
      */
-    private suspend fun completeChat(request: ChatCompletionRequest): ChatMessage {
+    private suspend fun completeChat(
+        request: ChatCompletionRequest,
+        onDebug: (suspend (String) -> Unit)? = null,
+    ): ChatMessage {
         if (!config.streaming) {
             return openAi.chatCompletion(request).choices.first().message
         }
@@ -400,29 +428,63 @@ abstract class Agent(
         data class ToolCallAccum(var id: String? = null, var name: String? = null, val args: StringBuilder = StringBuilder())
         val toolCalls = linkedMapOf<Int, ToolCallAccum>()
         var role: ChatRole = ChatRole.Assistant
-        openAi.chatCompletions(request).collect { chunk ->
-            val choice = chunk.choices.firstOrNull() ?: return@collect
-            val delta = choice.delta ?: return@collect
-            delta.role?.let { role = it }
-            delta.content?.let { contentBuf.append(it) }
-            delta.toolCalls?.forEach { tcc ->
-                val accum = toolCalls.getOrPut(tcc.index) { ToolCallAccum() }
-                tcc.id?.let { accum.id = it.id }
-                tcc.function?.nameOrNull?.let { accum.name = it }
-                tcc.function?.argumentsOrNull?.let { accum.args.append(it) }
+        var chunkCount = 0
+        var contentChunkCount = 0
+        var toolChunkCount = 0
+        var finishReason: String? = null
+        try {
+            openAi.chatCompletions(request).collect { chunk ->
+                chunkCount++
+                val choice = chunk.choices.firstOrNull() ?: return@collect
+                choice.finishReason?.let { finishReason = it.value }
+                val delta = choice.delta ?: return@collect
+                delta.role?.let { role = it }
+                delta.content?.let { contentBuf.append(it); contentChunkCount++ }
+                delta.toolCalls?.forEach { tcc ->
+                    toolChunkCount++
+                    val accum = toolCalls.getOrPut(tcc.index) { ToolCallAccum() }
+                    tcc.id?.takeIf { it.id.isNotBlank() }?.let { accum.id = it.id }
+                    tcc.function?.nameOrNull?.takeIf { it.isNotBlank() }?.let { accum.name = it }
+                    tcc.function?.argumentsOrNull?.let { accum.args.append(it) }
+                }
+            }
+        } catch (e: Throwable) {
+            onDebug?.invoke("[stream] collect threw ${e::class.simpleName}: ${e.message} (after $chunkCount chunks, content=$contentChunkCount, toolDeltas=$toolChunkCount)")
+            throw e
+        }
+        onDebug?.invoke("[stream] done: chunks=$chunkCount content=$contentChunkCount toolDeltas=$toolChunkCount finish=$finishReason toolCallAccums=${toolCalls.size}")
+        if (chunkCount == 0) {
+            throw IllegalStateException("流式响应未收到任何 chunk（网关可能未真正推送 SSE 数据）")
+        }
+        if (contentChunkCount == 0 && toolCalls.isEmpty()) {
+            throw IllegalStateException("流式响应有 $chunkCount 个 chunk，但 content 与 tool_calls 全空（网关可能吞掉了 delta，finish=$finishReason）")
+        }
+        if (onDebug != null) {
+            for ((idx, acc) in toolCalls) {
+                onDebug("[stream] raw accum[$idx]: id=${acc.id} name=${acc.name} argsLen=${acc.args.length}")
             }
         }
-        val builtToolCalls = toolCalls.values
-            .filter { !it.id.isNullOrBlank() && !it.name.isNullOrBlank() }
+        val validAccums = toolCalls.values
+            .filter { !it.name.isNullOrBlank() }
             .map { acc ->
-                ToolCall.Function(
-                    id = com.aallam.openai.api.chat.ToolId(acc.id!!),
-                    function = com.aallam.openai.api.chat.FunctionCall(
-                        nameOrNull = acc.name,
-                        argumentsOrNull = acc.args.toString(),
-                    ),
-                )
+                val argsStr = acc.args.toString().ifBlank { "{}" }
+                val id = acc.id?.takeIf { it.isNotBlank() } ?: "call_${java.util.UUID.randomUUID().toString().replace("-", "").take(16)}"
+                Triple(acc, id, argsStr)
             }
+        if (onDebug != null) {
+            for ((acc, id, argsStr) in validAccums) {
+                onDebug("[stream] tool_call assembled: name=${acc.name} id=$id args=${argsStr.take(300)}")
+            }
+        }
+        val builtToolCalls = validAccums.map { (acc, id, argsStr) ->
+            ToolCall.Function(
+                id = com.aallam.openai.api.chat.ToolId(id),
+                function = com.aallam.openai.api.chat.FunctionCall(
+                    nameOrNull = acc.name,
+                    argumentsOrNull = argsStr,
+                ),
+            )
+        }
         return ChatMessage(
             role = role,
             content = contentBuf.toString().ifEmpty { null },
@@ -447,6 +509,7 @@ abstract class Agent(
     }
 
     override fun close() {
+        AgentManager.unregister(id)
         distillationScheduler?.stop()
         scope.cancel()
         vectorStore?.close()

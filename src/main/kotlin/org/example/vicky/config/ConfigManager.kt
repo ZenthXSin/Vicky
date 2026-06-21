@@ -3,6 +3,11 @@ package org.example.vicky.config
 import com.aallam.openai.api.model.ModelId
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.jsonObject
 import org.example.vicky.agent.AgentConfig
 import org.example.vicky.agent.AgentMode
 import org.example.vicky.agent.EmbeddingConfig
@@ -122,9 +127,17 @@ object ConfigManager {
             return LoadResult(config, md, firstRun = true)
         }
 
-        val rawConfig = json.decodeFromString<ConfigData>(configFile.readText(Charsets.UTF_8))
+        val rawText = configFile.readText(Charsets.UTF_8)
+        val rawJson = json.parseToJsonElement(rawText).jsonObject
+        val rawConfig = json.decodeFromJsonElement<ConfigData>(rawJson)
         val configData = migrate(rawConfig)
-        if (configData !== rawConfig) save(configData)
+
+        val canonicalJson = json.encodeToJsonElement(ConfigData.serializer(), configData).jsonObject
+        val diff = detectDiff(rawJson, canonicalJson)
+        if (diff.hasChanges || configData !== rawConfig) {
+            if (diff.hasChanges) printDiff(diff)
+            save(configData)
+        }
 
         val agentMdFile = File(configDir, configData.agentMd)
         val agentMdContent = if (agentMdFile.exists()) {
@@ -136,9 +149,49 @@ object ConfigManager {
         return LoadResult(configData, agentMdContent, firstRun = false)
     }
 
+    private data class ConfigDiff(
+        val added: List<Pair<String, JsonElement>>,
+        val removed: List<String>,
+    ) {
+        val hasChanges get() = added.isNotEmpty() || removed.isNotEmpty()
+    }
+
+    private fun detectDiff(rawJson: JsonObject, canonicalJson: JsonObject, prefix: String = ""): ConfigDiff {
+        val added = mutableListOf<Pair<String, JsonElement>>()
+        val removed = mutableListOf<String>()
+        for ((key, value) in canonicalJson) {
+            val path = if (prefix.isEmpty()) key else "$prefix.$key"
+            when {
+                key !in rawJson -> added.add(path to value)
+                value is JsonObject && rawJson[key] is JsonObject -> {
+                    val nested = detectDiff(rawJson[key]!!.jsonObject, value, path)
+                    added += nested.added
+                    removed += nested.removed
+                }
+            }
+        }
+        for (key in rawJson.keys) {
+            val path = if (prefix.isEmpty()) key else "$prefix.$key"
+            if (key !in canonicalJson) removed.add(path)
+        }
+        return ConfigDiff(added, removed)
+    }
+
+    private fun printDiff(diff: ConfigDiff) {
+        println("[Vicky] 配置文件已自动更新，差异如下：")
+        if (diff.added.isNotEmpty()) {
+            println("  新增字段（已补全默认值）：")
+            diff.added.forEach { (path, value) -> println("    + $path = $value") }
+        }
+        if (diff.removed.isNotEmpty()) {
+            println("  废弃字段（已从配置中移除）：")
+            diff.removed.forEach { path -> println("    - $path") }
+        }
+        println("[Vicky] 更新后的配置已自动写入 config.json")
+    }
+
     /** 老配置幂等迁移：保证关键字段不缺。 */
-    private fun migrate(config: ConfigData): ConfigData {
-        val mem = config.memory
+    private fun migrate(config: ConfigData): ConfigData {        val mem = config.memory
         val needTmpIgnore = "config/tmp" !in mem.fileIndexIgnorePatterns
         if (!needTmpIgnore) return config
         return config.copy(
@@ -176,7 +229,7 @@ object ConfigManager {
             agentMd = agentMdFileName,
             debug = false,
             think = true,
-            builtinTools = true,
+            builtinTools = false,
             oneBot = OneBotConfigData(
                 url = "ws://127.0.0.1:3001",
                 token = "NojbBpwpI3OgBG3z",
