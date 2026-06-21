@@ -3,7 +3,7 @@
 ![未奇(AI生成)](src/main/resources/vicky.png)
 
 [![Maven Central](https://img.shields.io/maven-central/v/io.github.zenthxsin/vicky)](https://central.sonatype.com/artifact/io.github.zenthxsin/vicky)
-[![Downloads](https://img.shields.io/maven-central/dm/io.github.zenthxsin/vicky)](https://central.sonatype.com/artifact/io.github.zenthxsin/vicky)
+[![Release](https://img.shields.io/github/v/release/zenthxsin/vicky)](https://github.com/zenthxsin/vicky/releases)
 [![License](https://img.shields.io/github/license/zenthxsin/vicky)](https://github.com/zenthxsin/vicky/blob/main/LICENSE)
 [![Build Status](https://img.shields.io/github/actions/workflow/status/zenthxsin/vicky/build.yml?branch=main)](https://github.com/zenthxsin/vicky/actions)
 [![Java](https://img.shields.io/badge/Java-17%2B-orange)](https://www.oracle.com/java/)
