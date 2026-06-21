@@ -29,6 +29,7 @@ data class ConfigData(
     val streaming: Boolean = true,
     val builtinTools: Boolean = true,
     val toolStates: Map<String, Boolean> = emptyMap(),
+    val skillStates: Map<String, Boolean> = emptyMap(),
     val embedding: EmbeddingConfigData = EmbeddingConfigData(),
     val oneBot: OneBotConfigData = OneBotConfigData(),
     val qdrant: QdrantConfigData = QdrantConfigData(),

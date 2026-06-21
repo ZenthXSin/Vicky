@@ -68,7 +68,7 @@ class OneBot(
         listOf(
             "send_message", "group_manage", "friend_manage", "group_quit", "group_announcements",
             "file_write", "send_image", "send_video", "recall_message", "set_name_card",
-            "essence_message", "group_files", "group_whitelist_add", "manage_tools"
+            "essence_message", "group_files", "group_whitelist_add", "manage_tools", "manage_skills"
         ).forEach { adminToolList.add(it) }
         registerListeners()
         return true

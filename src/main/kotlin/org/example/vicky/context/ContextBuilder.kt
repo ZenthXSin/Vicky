@@ -1,6 +1,7 @@
 package org.example.vicky.context
 
 import org.example.vicky.agent.AgentMode
+import org.example.vicky.skill.SkillManager
 import org.example.vicky.tool.ToolRegistry
 
 /**
@@ -29,6 +30,15 @@ class ContextBuilder(
         if (mode.toolsEnabled && !tools.isEmpty()) {
             append("\n\n# Tool Usage Guide\n")
             append(TOOL_USAGE_GUIDE)
+        }
+
+        val skills = SkillManager.all()
+        if (skills.isNotEmpty()) {
+            append("\n\n# Available Skills\n")
+            for (s in skills) {
+                append("- ").append(s.name).append(": ").append(s.description).append('\n')
+            }
+            append("\nWhen a user request matches a skill, call `invoke_skill(name=<skill-name>)` first to load its full instructions, then follow them.")
         }
     }
 

@@ -118,6 +118,8 @@ abstract class Agent(
             BuiltinTools.all(baseDir, memoryStore, fileIndexService, distillationScheduler).forEach { tools.register(it) }
             toolManagementTool = ToolManagementTool { persistToolStates() }
             tools.register(toolManagementTool)
+            tools.register(org.example.vicky.tool.builtin.InvokeSkillTool())
+            tools.register(org.example.vicky.tool.builtin.ManageSkillsTool { persistSkillStates() })
             for ((toolName, enabled) in config.toolStates) {
                 if (!enabled) tools.unregister(toolName)
             }
@@ -173,6 +175,12 @@ abstract class Agent(
         val allStates = (activeStates + disabledStates).toMap()
         val configData = ConfigManager.loadOrCreate().config
         ConfigManager.save(configData.copy(toolStates = allStates))
+    }
+
+    private fun persistSkillStates() {
+        val states = org.example.vicky.skill.SkillManager.getStates()
+        val configData = ConfigManager.loadOrCreate().config
+        ConfigManager.save(configData.copy(skillStates = states))
     }
 
     /**

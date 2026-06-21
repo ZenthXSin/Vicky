@@ -47,6 +47,11 @@ fun main() = runBlocking {
 
     println("[Vicky] 配置已加载: ${ConfigManager.getConfigDir().absolutePath}")
 
+    org.example.vicky.skill.SkillManager.load(
+        java.io.File(ConfigManager.getConfigDir(), "skills"),
+        result.config.skillStates,
+    )
+
     val oneBot = OneBot(agentConfig, oneBotConfig.url, oneBotConfig.token)
 
     oneBot.connect()
