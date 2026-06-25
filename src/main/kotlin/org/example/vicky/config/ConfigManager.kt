@@ -219,6 +219,15 @@ object ConfigManager {
 
         File(configDir, agentMdFileName).writeText(agentMdContent, Charsets.UTF_8)
 
+        // 创建 scripts 和 skills 目录，复制默认资源
+        val scriptsDir = File(configDir, "scripts")
+        scriptsDir.mkdirs()
+        copyResourceIfAbsent("scripts/hello.ts", File(scriptsDir, "hello.ts"))
+
+        val skillsDir = File(configDir, "skills")
+        skillsDir.mkdirs()
+        copyResourceIfAbsent("skills/script-writing/SKILL.md", File(skillsDir, "script-writing/SKILL.md"))
+
         val configData = ConfigData(
             model = "deepseek-v4-flash",
             apiKey = "sk-Nhxs7MO3HDspptIICNmgobNdmeSc4RcIM6Aa4FLxvqgxeM6S",
@@ -245,6 +254,15 @@ object ConfigManager {
         )
 
         return Pair(configData, agentMdContent)
+    }
+
+    private fun copyResourceIfAbsent(resourcePath: String, target: File) {
+        if (target.exists()) return
+        target.parentFile?.mkdirs()
+        val stream = ConfigManager::class.java.classLoader?.getResourceAsStream(resourcePath) ?: return
+        stream.use { input ->
+            target.outputStream().use { output -> input.copyTo(output) }
+        }
     }
 
     fun toAgentConfig(configData: ConfigData, agentMdContent: String): AgentConfig {
