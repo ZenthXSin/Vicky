@@ -17,6 +17,7 @@ repositories {
 
 dependencies {
     implementation(project(":src:main:vicky-core"))
+    implementation(project(":src:main:vicky-script"))
 
     implementation("com.aallam.openai:openai-client:4.1.0")
 

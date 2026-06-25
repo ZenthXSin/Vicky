@@ -430,6 +430,11 @@ class OneBot(
                 }
             }
             ToolRegistry.tools("mirai").forEach { tools.register(it) }
+
+            // 加载脚本工具
+            val scriptsDir = java.io.File(org.example.vicky.config.ConfigManager.getConfigDir(), "scripts")
+            org.example.vicky.script.ScriptManager.loadAll(scriptsDir, tools)
+            org.example.vicky.script.ScriptManager.startWatcher(scriptsDir, tools)
         }
 
         override suspend fun onTurnStart(msg: InboundMessage, history: MutableList<ChatMessage>) {

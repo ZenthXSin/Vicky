@@ -10,7 +10,7 @@ import org.example.vicky.context.ContextManager
  * @property groupId 群聊id（如果有）
  * @property contextManager 上下文管理器，可用于清空上下文等操作。
  * @property tools 当前工具注册表。
- * @property buffer 消息缓冲区 (仅 OneBot 等渠道提供，控制台场景为 null)。
+ * @property buffer 消息缓冲区 (仅 OneBot 等渠道提供，控制台场景为 null)。类型由渠道决定。
  */
 class ToolContext(
     val userId: String,
@@ -18,5 +18,5 @@ class ToolContext(
     val groupId: String = "",
     val contextManager: ContextManager,
     val tools: ToolRegistry,
-    val buffer: org.example.vicky.buffer.MessageBuffer? = null,
+    val buffer: Any? = null,
 )

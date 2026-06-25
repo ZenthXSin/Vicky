@@ -48,7 +48,7 @@ fun main() = runBlocking {
 
     println("[Vicky] 配置已加载: ${ConfigManager.getConfigDir().absolutePath}")
 
-    org.example.vicky.skill.SkillManager.load(
+    org.example.vicky.skill.SkillLoader.load(
         java.io.File(ConfigManager.getConfigDir(), "skills"),
         result.config.skillStates,
     )

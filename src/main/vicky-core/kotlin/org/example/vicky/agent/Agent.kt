@@ -47,8 +47,8 @@ abstract class Agent(
     /** 子类提供：工具权限。默认全允许可在子类中 override。 */
     protected open val authorizer: ToolAuthorizer = ToolAuthorizer.ALLOW_ALL
 
-    /** 子类提供：消息缓冲区。控制台等无缓冲场景保持 null。 */
-    protected open val buffer: org.example.vicky.buffer.MessageBuffer? = null
+    /** 子类提供：消息缓冲区。控制台等无缓冲场景保持 null。类型由子类决定。 */
+    protected open val buffer: Any? = null
 
     /** 子类 override 以初始化记忆系统（向量存储、Embedding 等）。在 initTools() 之前调用。 */
     protected open fun initMemory() {}

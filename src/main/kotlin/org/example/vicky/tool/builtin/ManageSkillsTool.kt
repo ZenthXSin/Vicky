@@ -7,6 +7,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
+import org.example.vicky.skill.SkillLoader
 import org.example.vicky.skill.SkillManager
 import org.example.vicky.tool.Tool
 import org.example.vicky.tool.ToolResult
@@ -65,7 +66,7 @@ class ManageSkillsTool(
     private fun list(): ToolResult {
         val all = SkillManager.allIncludingDisabled()
         if (all.isEmpty()) {
-            val root = SkillManager.rootDir()?.absolutePath ?: "(未初始化)"
+            val root = SkillLoader.rootDir()?.absolutePath ?: "(未初始化)"
             return ToolResult(toAgent = "no skills found. skills dir: $root")
         }
         val sb = StringBuilder()
@@ -96,7 +97,7 @@ class ManageSkillsTool(
         if (SkillManager.find(name) == null) {
             return ToolResult(toAgent = "error: skill '$name' not found")
         }
-        val ok = SkillManager.delete(name)
+        val ok = SkillLoader.delete(name)
         if (!ok) return ToolResult(toAgent = "error: failed to delete skill '$name' (filesystem error)")
         onStateChange?.invoke()
         return ToolResult(toAgent = "skill '$name' deleted (directory removed)")

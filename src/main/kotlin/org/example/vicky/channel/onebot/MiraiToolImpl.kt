@@ -668,7 +668,7 @@ object MiraiToolImpl {
         @ToolParam(description = "'all' = all buffered messages, 'unread' = only new since last query.") mode: String = "all",
         @ToolParam(description = "'text' = plain text, 'media' = rich media, 'raw' = original message.") type: String = "text",
     ): ToolResult {
-        val buf = ctx.buffer ?: return ToolResult(toAgent = "Error: message buffer is not available in this context.")
+        val buf = (ctx.buffer as? org.example.vicky.buffer.MessageBuffer) ?: return ToolResult(toAgent = "Error: message buffer is not available in this context.")
         val convId = ctx.conversationId
         val unread = mode == "unread"
         val result = when (type) {

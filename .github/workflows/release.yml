@@ -117,6 +117,41 @@ jobs:
           ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
 
+  publish-vicky-script:
+    needs: resolve-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x ./gradlew
+
+      - name: Build vicky-script
+        run: ./gradlew :src:main:vicky-script:build -Pversion=${{ needs.resolve-version.outputs.version }} --no-daemon --stacktrace
+
+      - name: Upload vicky-script JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: vicky-script
+          path: src/main/vicky-script/build/libs/vicky-script-${{ needs.resolve-version.outputs.version }}.jar
+
+      - name: Publish vicky-script to Maven Central
+        run: ./gradlew :src:main:vicky-script:publishAndReleaseToMavenCentral -Pversion=${{ needs.resolve-version.outputs.version }} --no-daemon --stacktrace
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
+
   publish-vicky:
     needs: [resolve-version, publish-vicky-core]
     runs-on: ubuntu-latest
@@ -153,7 +188,7 @@ jobs:
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
 
   github-release:
-    needs: [resolve-version, publish-vicky-core, publish-vicky-ksp, publish-vicky]
+    needs: [resolve-version, publish-vicky-core, publish-vicky-ksp, publish-vicky-script, publish-vicky]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts

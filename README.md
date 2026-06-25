@@ -66,6 +66,41 @@
 | `memory_search` | 语义搜索记忆 |
 | `memory_distill` | 手动触发记忆蒸馏 |
 
+### 动态脚本系统（vicky-script）
+
+- **TypeScript 脚本**：用户编写 `.ts` 文件定义 Tool，无需编译宿主应用。
+- **热加载**：修改脚本后自动重载，无需重启 Agent。
+- **类自动注入**：classpath 上的类（Vicky 框架类、Java 标准库等）在脚本中直接可用，无需 import。
+- **全量 API 访问**：脚本可访问 ToolContext（会话历史、工具注册表、消息缓冲区等），能力等同原生 Kotlin Tool。
+- **内嵌 TypeScript 编译器**：自动将 `.ts` 编译为 `.js`，用户无需安装 Node.js。
+
+使用示例（`config/scripts/hello.ts`）：
+
+```typescript
+var name = "hello";
+var description = "打招呼工具";
+var parameters = {
+    type: "object",
+    properties: { name: { type: "string", description: "用户名" } },
+    required: ["name"]
+};
+
+async function execute(ctx, args) {
+    return {
+        toAgent: "greeted " + args.name,
+        userReply: "你好 " + args.name + "！"
+    };
+}
+```
+
+脚本中可直接使用注入的类：
+
+```typescript
+var f = new File("./config/config.json");
+var content = Files.readString(f.toPath());
+var now = LocalDateTime.now();
+```
+
 ### 调试输出
 
 - `debug = true`：框架运行日志（每步推理、工具调用、上下文清除等）。
@@ -134,6 +169,20 @@ src/main/kotlin/org/example/vicky/
     ConfigManager.kt      # JSON 配置加载/生成
   examples/
     ConsoleMain.kt        # 控制台示例
+
+src/main/vicky-script/    # 动态脚本模块
+  kotlin/org/example/vicky/script/
+    ScriptEngine.kt        # Rhino JS 引擎 + TS 编译
+    ScriptManager.kt       # 脚本生命周期 + 热加载
+    ScriptToolBridge.kt    # JS Tool → vicky Tool 适配
+    ClassAutoRegistry.kt   # 类自动注入
+    ScriptConfig.kt        # 配置模型
+  resources/
+    typescript.js           # TypeScript 编译器
+
+src/main/vicky-ksp/        # KSP 注解处理器模块
+  kotlin/org/example/vicky/ksp/
+    VickyToolProcessor.kt  # @VickyTool 注解处理
 ```
 
 ## 快速开始
