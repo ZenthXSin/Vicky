@@ -9,7 +9,6 @@ import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import org.example.vicky.script.ScriptManager
 import org.example.vicky.tool.Tool
-import org.example.vicky.tool.ToolContext
 import org.example.vicky.tool.ToolRegistry
 import org.example.vicky.tool.ToolResult
 import java.io.File
@@ -52,7 +51,7 @@ class ManageScriptsTool(
         putJsonArray("required") { add(JsonPrimitive("action")) }
     }
 
-    override suspend fun execute(ctx: ToolContext, args: JsonObject): ToolResult {
+    override suspend fun execute(userId: String, args: JsonObject): ToolResult {
         val action = args["action"]?.jsonPrimitive?.content
             ?: return ToolResult(toAgent = "error: missing required parameter 'action'")
         return when (action) {
