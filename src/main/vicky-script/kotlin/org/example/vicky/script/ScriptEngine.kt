@@ -4,6 +4,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.mozilla.javascript.Context
+import org.mozilla.javascript.EcmaError
+import org.mozilla.javascript.EvaluatorException
 import org.mozilla.javascript.Function
 import org.mozilla.javascript.ScriptableObject
 import org.mozilla.javascript.Undefined
@@ -111,6 +113,14 @@ class ScriptEngine {
         } catch (e: ScriptException) {
             Context.exit()
             throw e
+        } catch (e: EcmaError) {
+            Context.exit()
+            val line = if (e.lineNumber() > 0) " (line ${e.lineNumber()})" else ""
+            throw ScriptException("Runtime error in $fileName$line: ${e.name}: ${e.errorMessage}", e)
+        } catch (e: EvaluatorException) {
+            Context.exit()
+            val line = if (e.lineNumber() > 0) " (line ${e.lineNumber()})" else ""
+            throw ScriptException("Evaluation error in $fileName$line: ${e.message}", e)
         } catch (e: Exception) {
             Context.exit()
             throw ScriptException("Failed to execute script $fileName: ${e.message}", e)
@@ -174,6 +184,27 @@ class ScriptEngine {
             return map
         }
         return mapOf("toAgent" to Context.toString(result))
+    }
+
+    /**
+     * 带行号信息的 execute 调用，供 diagnose / run 使用。
+     */
+    fun callExecuteSafe(
+        exports: ScriptExports,
+        toolCtx: org.example.vicky.tool.ToolContext,
+        args: JsonObject,
+    ): Map<String, Any?> {
+        return try {
+            callExecute(exports, toolCtx, args)
+        } catch (e: EcmaError) {
+            val line = if (e.lineNumber() > 0) " (line ${e.lineNumber()})" else ""
+            mapOf("toAgent" to "Runtime error$line: ${e.name}: ${e.errorMessage}", "error" to true)
+        } catch (e: EvaluatorException) {
+            val line = if (e.lineNumber() > 0) " (line ${e.lineNumber()})" else ""
+            mapOf("toAgent" to "Evaluation error$line: ${e.message}", "error" to true)
+        } catch (e: Exception) {
+            mapOf("toAgent" to "Error: ${e.message}", "error" to true)
+        }
     }
 
     fun releaseExports(exports: ScriptExports) {

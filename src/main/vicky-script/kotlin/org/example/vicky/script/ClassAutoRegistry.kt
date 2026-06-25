@@ -9,6 +9,7 @@ import java.io.File
 import java.net.URLDecoder
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.time.LocalDateTime
 import java.time.LocalDate
 import java.time.LocalTime
@@ -48,6 +49,7 @@ object ClassAutoRegistry {
         HashSet::class.java,
         StringBuilder::class.java,
         String::class.java,
+        StandardCopyOption::class.java,
     )
 
     fun init() {
@@ -104,6 +106,13 @@ object ClassAutoRegistry {
     private fun injectClass(ctx: Context, scope: ScriptableObject, name: String, cls: Class<*>) {
         try {
             val proxy = createClassProxy(ctx, scope, cls)
+            // 枚举类型：将枚举常量注入为属性，如 StandardCopyOption.REPLACE_EXISTING
+            if (cls.isEnum) {
+                for (constant in cls.enumConstants) {
+                    val enumVal = constant as Enum<*>
+                    ScriptableObject.putProperty(proxy, enumVal.name, Context.javaToJS(constant, scope))
+                }
+            }
             ScriptableObject.putProperty(scope, name, proxy)
         } catch (e: Exception) {
             println("[Vicky][script] 注入类 $name 失败: ${e.message}")
