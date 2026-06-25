@@ -122,7 +122,7 @@ class OneBot(
         listOf(
             "send_message", "group_manage", "friend_manage", "group_quit", "group_announcements",
             "file_write", "send_image", "send_video", "recall_message", "set_name_card",
-            "essence_message", "group_files", "group_whitelist_add", "manage_tools", "manage_skills"
+            "essence_message", "group_files", "group_whitelist_add", "manage_tools", "manage_skills", "manage_scripts"
         ).forEach { adminToolList.add(it) }
         agent = OneBotAgent(agentConfig, memoryConfig, bot!!, buffer, adminList, adminToolList)
         registerListeners()
@@ -431,10 +431,9 @@ class OneBot(
             }
             ToolRegistry.tools("mirai").forEach { tools.register(it) }
 
-            // 加载脚本工具
+            // 脚本管理工具（用户通过 manage_scripts 工具按需加载/卸载脚本）
             val scriptsDir = java.io.File(org.example.vicky.config.ConfigManager.getConfigDir(), "scripts")
-            org.example.vicky.script.ScriptManager.loadAll(scriptsDir, tools)
-            org.example.vicky.script.ScriptManager.startWatcher(scriptsDir, tools)
+            tools.register(org.example.vicky.tool.builtin.ManageScriptsTool(scriptsDir, tools))
         }
 
         override suspend fun onTurnStart(msg: InboundMessage, history: MutableList<ChatMessage>) {

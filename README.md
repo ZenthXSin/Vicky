@@ -184,16 +184,21 @@ description: 代码审查技能
 
 ### 动态脚本系统（vicky-script）
 
-- **TypeScript 脚本**：用户编写 `.ts` 文件定义 Tool，无需编译宿主应用。
-- **热加载**：修改脚本后自动重载，无需重启 Agent。
-- **类自动注入**：classpath 上的类（Vicky 框架类、Java 标准库等）在脚本中直接可用，无需 import。
-- **全量 API 访问**：脚本可访问 ToolContext（会话历史、工具注册表、消息缓冲区等），能力等同原生 Kotlin Tool。
-- **内嵌 TypeScript 编译器**：自动将 `.ts` 编译为 `.js`，用户无需安装 Node.js。
+vicky-script 提供 TypeScript 脚本的编译、执行和 Tool 桥接能力。模块本身不扫描目录、不监控文件，由调用方决定何时加载。
 
-脚本放置在 `config/scripts/` 目录下：
+**核心 API：**
+- `ScriptManager.loadScript(file)` — 编译并执行 TS 文件，返回 `ScriptToolBridge`（即 `Tool`）
+- `ScriptManager.loadScriptFromSource(tsSource, fileName)` — 从源码字符串加载
+- `ScriptManager.loadAndRegister(file, registry)` — 加载并注册到 ToolRegistry
+- `ScriptManager.unloadScript(fileName, registry)` — 卸载并从 registry 移除
+- `ScriptManager.reloadScript(file, registry)` — 重载脚本
+
+**特性：**
+- **TypeScript 编译**：内嵌 TypeScript 4.9.5 编译器，自动将 `.ts` 编译为 `.js`
+- **类自动注入**：classpath 上的类（Vicky 框架类、Java 标准库等）在脚本中直接可用，无需 import
+- **全量 API 访问**：脚本可访问 ToolContext（会话历史、工具注册表、消息缓冲区等），能力等同原生 Kotlin Tool
 
 ```typescript
-// config/scripts/hello.ts
 var name = "hello";
 var description = "打招呼工具";
 var parameters = {
@@ -225,6 +230,8 @@ var msg = InboundMessage({ userId: "123", content: "hi" });
 // kotlinx.serialization.json
 var obj = buildJsonObject({ put("key", JsonPrimitive("value")) });
 ```
+
+根应用提供 `manage_scripts` 工具，Agent 可通过该工具按需加载/卸载/重载脚本。
 
 ### 上下文管理
 

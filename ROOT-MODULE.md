@@ -138,7 +138,13 @@ Vicky 内置 OneBot 通道，可直接连接 QQ 机器人（通过 [NapCat](http
 | 工具 | 说明 |
 |------|------|
 | `invoke_skill` | 加载技能全文指南 |
-| `manage_skills` | list / enable / disable / delete 技能 |
+| `manage_skills` | 🔒 list / enable / disable / delete 技能 |
+
+### 脚本工具
+
+| 工具 | 说明 |
+|------|------|
+| `manage_scripts` | 🔒 list / load / unload / reload / load_all 脚本 |
 
 ## Mirai 工具集（OneBot 通道专用）
 

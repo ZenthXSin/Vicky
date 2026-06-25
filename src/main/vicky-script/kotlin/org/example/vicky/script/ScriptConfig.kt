@@ -7,7 +7,6 @@ import java.io.File
 data class ScriptConfig(
     val scriptsDir: File,
     val enabled: Boolean = true,
-    val watchIntervalMs: Long = 500,
     val tsCompilerOptions: TsCompilerOptions = TsCompilerOptions(),
 )
 
