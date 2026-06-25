@@ -11,6 +11,7 @@ import kotlinx.serialization.json.jsonObject
 import org.example.vicky.agent.AgentConfig
 import org.example.vicky.agent.AgentMode
 import org.example.vicky.agent.EmbeddingConfig
+import org.example.vicky.channel.onebot.MemoryConfig
 import java.io.File
 
 @Serializable
@@ -253,7 +254,6 @@ object ConfigManager {
             else -> AgentMode.SILENT
         }
         val memory = configData.memory
-        val qdrant = configData.qdrant
         return AgentConfig(
             model = ModelId(configData.model),
             apiKey = configData.apiKey,
@@ -269,6 +269,17 @@ object ConfigManager {
             streaming = configData.streaming,
             builtinTools = configData.builtinTools,
             toolStates = configData.toolStates,
+            conversationStoreMaxConversations = memory.conversationStoreMaxConversations,
+            conversationStoreMaxMessages = memory.conversationStoreMaxMessages,
+            messageBufferMaxGlobalEntries = memory.messageBufferMaxGlobalEntries,
+            messageBufferRawTruncate = memory.messageBufferRawTruncate,
+        )
+    }
+
+    fun toMemoryConfig(configData: ConfigData): MemoryConfig {
+        val memory = configData.memory
+        val qdrant = configData.qdrant
+        return MemoryConfig(
             embedding = toEmbeddingConfig(configData.embedding),
             qdrantHost = if (qdrant.enabled) qdrant.host else null,
             qdrantGrpcPort = qdrant.grpcPort,
@@ -294,10 +305,6 @@ object ConfigManager {
             fileIndexIgnorePatterns = memory.fileIndexIgnorePatterns,
             fileIndexPaths = memory.fileIndexPaths,
             fileIndexAutoIndexOnStart = memory.fileIndexAutoIndexOnStart,
-            conversationStoreMaxConversations = memory.conversationStoreMaxConversations,
-            conversationStoreMaxMessages = memory.conversationStoreMaxMessages,
-            messageBufferMaxGlobalEntries = memory.messageBufferMaxGlobalEntries,
-            messageBufferRawTruncate = memory.messageBufferRawTruncate,
         )
     }
 

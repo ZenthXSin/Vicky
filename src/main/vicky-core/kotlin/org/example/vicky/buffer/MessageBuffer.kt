@@ -1,4 +1,4 @@
-package org.example.vicky.channel.onebot
+package org.example.vicky.buffer
 
 import java.util.concurrent.ConcurrentHashMap
 

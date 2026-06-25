@@ -26,6 +26,7 @@ import net.mamoe.mirai.utils.ExternalResource.Companion.toExternalResource
 import org.example.vicky.annotations.ToolGroup
 import org.example.vicky.annotations.ToolParam
 import org.example.vicky.annotations.VickyTool
+import org.example.vicky.buffer.BufferedMessage
 import org.example.vicky.tool.ToolContext
 import org.example.vicky.tool.ToolResult
 import java.util.concurrent.ConcurrentHashMap

@@ -8,34 +8,17 @@ import com.aallam.openai.api.core.Parameters
 import com.aallam.openai.api.chat.ToolCall
 import com.aallam.openai.api.chat.ToolType
 import com.aallam.openai.client.OpenAI
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
-import org.example.vicky.context.ContextBuilder
-import org.example.vicky.context.ContextCompactor
-import org.example.vicky.context.ConversationStore
-import org.example.vicky.file.FileIndexService
+import org.example.vicky.context.ContextManager
 import org.example.vicky.io.InboundMessage
 import org.example.vicky.io.MessageSink
 import org.example.vicky.io.OutboundMessage
-import org.example.vicky.llm.EmbeddingClientFactory
 import org.example.vicky.llm.OpenAiClientFactory
-import org.example.vicky.memory.Distiller
-import org.example.vicky.memory.DistillationScheduler
-import org.example.vicky.memory.QdrantMemoryStore
-import org.example.vicky.memory.RawMemory
 import org.example.vicky.tool.Tool
 import org.example.vicky.tool.ToolAuthorizer
 import org.example.vicky.tool.ToolContext
 import org.example.vicky.tool.ToolRegistry
 import org.example.vicky.tool.ToolResult
-import org.example.vicky.tool.builtin.BuiltinTools
-import org.example.vicky.tool.builtin.ToolManagementTool
-import org.example.vicky.config.ConfigManager
-import org.example.vicky.vector.QdrantVectorStore
 import com.aallam.openai.api.chat.Tool as OAITool
 
 /**
@@ -45,107 +28,17 @@ import com.aallam.openai.api.chat.Tool as OAITool
 abstract class Agent(
     protected val config: AgentConfig,
     private val openAi: OpenAI = OpenAiClientFactory.create(config),
-    protected val contextBuilder: ContextBuilder = ContextBuilder(config.agentMd),
-    protected val store: ConversationStore = ConversationStore(
-        maxConversations = config.conversationStoreMaxConversations,
-        maxMessages = config.conversationStoreMaxMessages,
-    ),
 ) : AutoCloseable {
+    protected abstract val contextManager: ContextManager
     val tools: ToolRegistry = ToolRegistry()
     val id: String get() = config.id
     val name: String? get() = config.name
-    private val compactor = ContextCompactor(config, openAi)
-    private lateinit var toolManagementTool: ToolManagementTool
     private var cachedOaiTools: List<OAITool>? = null
-    private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-
-    // 向量存储组件（Qdrant 不可用时自动禁用记忆功能）
-    private val vectorStore: QdrantVectorStore? = run {
-        if (config.qdrantHost == null || config.embedding == null) return@run null
-        try {
-            QdrantVectorStore(config.qdrantHost, config.qdrantHttpPort)
-        } catch (e: Exception) {
-            println("[Vicky] Qdrant 连接失败: ${e.message}")
-            println("[Vicky] 记忆功能已禁用")
-            null
-        }
-    }
-
-    private val embeddingClient: org.example.vicky.llm.EmbeddingClient? = run {
-        config.embedding?.let { EmbeddingClientFactory.create(it) }
-    }
-
-    private val memoryStore: QdrantMemoryStore? = if (vectorStore != null && embeddingClient != null) {
-        QdrantMemoryStore(vectorStore, embeddingClient, config.memoryCollection, config.memoryRawCollection)
-    } else null
-
-    private val fileIndexService: FileIndexService? = if (vectorStore != null && embeddingClient != null && config.fileIndexEnabled) {
-        FileIndexService(
-            vectorStore, embeddingClient,
-            java.io.File(System.getProperty("user.dir")),
-            config.fileIndexCollection,
-            config.fileIndexChunkSize,
-            config.fileIndexChunkOverlap,
-            config.fileIndexIgnorePatterns,
-            config.fileIndexPaths,
-        )
-    } else null
-
-    private val distiller: Distiller? = if (memoryStore != null && embeddingClient != null) {
-        Distiller(openAi, embeddingClient)
-    } else null
-
-    private val distillationScheduler: DistillationScheduler? = if (distiller != null && config.distillationEnabled) {
-        DistillationScheduler(memoryStore!!, distiller, config.distillationMaxConversations, true)
-    } else null
 
     init {
         AgentManager.register(this)
-        // 打印向量存储初始化状态
-        if (embeddingClient != null) {
-            val dimText = if (embeddingClient.dimension > 0) "维度: ${embeddingClient.dimension}" else "维度: 待首次调用确定"
-            println("[Vicky] 语义模型已加载（$dimText）")
-        }
-        if (vectorStore != null) {
-            println("[Vicky] 向量存储已连接: ${config.qdrantHost}:${config.qdrantHttpPort}")
-        }
-        if (memoryStore != null) {
-            println("[Vicky] 记忆系统已启用（topK: ${config.memoryTopK}, tokenBudget: ${config.memoryTokenBudget}）")
-        }
-
-        if (config.builtinTools) {
-            val baseDir = java.io.File(System.getProperty("user.dir"))
-            BuiltinTools.all(baseDir, memoryStore, fileIndexService, distillationScheduler).forEach { tools.register(it) }
-            toolManagementTool = ToolManagementTool { persistToolStates() }
-            tools.register(toolManagementTool)
-            tools.register(org.example.vicky.tool.builtin.InvokeSkillTool())
-            tools.register(org.example.vicky.tool.builtin.ManageSkillsTool { persistSkillStates() })
-            for ((toolName, enabled) in config.toolStates) {
-                if (!enabled) tools.unregister(toolName)
-            }
-            cachedOaiTools = null
-        }
-
-        // 启动时后台自动索引文件（不阻塞主线程）
-        if (fileIndexService != null && config.fileIndexAutoIndexOnStart) {
-            println("[Vicky] 开始后台索引文件...")
-            scope.launch(Dispatchers.IO) {
-                try {
-                    val result = fileIndexService.indexAll { current, success, skipped ->
-                        print("\r[Vicky] 索引中: 已处理 $current 个文件，$success 个已索引，$skipped 个已跳过")
-                    }
-                    println("\n[Vicky] 文件索引完成: ${result.newFiles} 个新增，${result.updatedFiles} 个更新，${result.skippedFiles} 个跳过")
-                } catch (e: Exception) {
-                    println("\n[Vicky] 文件索引失败: ${e.message}")
-                }
-            }
-        }
-
-        // 启动蒸馏调度器
-        if (distillationScheduler != null) {
-            distillationScheduler.start()
-            println("[Vicky] 蒸馏调度器已启动")
-        }
+        initMemory()
+        initTools()
     }
 
     /** 子类提供：消息出口。 */
@@ -155,7 +48,25 @@ abstract class Agent(
     protected open val authorizer: ToolAuthorizer = ToolAuthorizer.ALLOW_ALL
 
     /** 子类提供：消息缓冲区。控制台等无缓冲场景保持 null。 */
-    protected open val buffer: org.example.vicky.channel.onebot.MessageBuffer? = null
+    protected open val buffer: org.example.vicky.buffer.MessageBuffer? = null
+
+    /** 子类 override 以初始化记忆系统（向量存储、Embedding 等）。在 initTools() 之前调用。 */
+    protected open fun initMemory() {}
+
+    /** 子类 override 以注册内置工具。默认无操作。 */
+    protected open fun initTools() {}
+
+    /** 子类 override 以持久化工具状态。默认无操作。 */
+    protected open fun onToolStatesChanged() {}
+
+    /** 子类 override 以持久化技能状态。默认无操作。 */
+    protected open fun onSkillStatesChanged() {}
+
+    /** 子类 override 以在每轮结束时保存原始记忆等。默认无操作。 */
+    protected open suspend fun onTurnEnd(msg: InboundMessage, assistantReply: String?) {}
+
+    /** 子类 override 以在每轮开始时 recall 记忆并注入 history。默认无操作。 */
+    protected open suspend fun onTurnStart(msg: InboundMessage, history: MutableList<ChatMessage>) {}
 
     /** 运行时注册工具。 */
     fun registerTool(tool: Tool) {
@@ -169,20 +80,6 @@ abstract class Agent(
         return result
     }
 
-    private fun persistToolStates() {
-        val activeStates = tools.snapshot().filter { it.name != "manage_tools" }.map { it.name to true }
-        val disabledStates = toolManagementTool.getDisabledToolNames().map { it to false }
-        val allStates = (activeStates + disabledStates).toMap()
-        val configData = ConfigManager.loadOrCreate().config
-        ConfigManager.save(configData.copy(toolStates = allStates))
-    }
-
-    private fun persistSkillStates() {
-        val states = org.example.vicky.skill.SkillManager.getStates()
-        val configData = ConfigManager.loadOrCreate().config
-        ConfigManager.save(configData.copy(skillStates = states))
-    }
-
     /**
      * 入口：外部把收到的消息丢进来。
      */
@@ -191,33 +88,18 @@ abstract class Agent(
         replySink: MessageSink? = null,
         clearContextAfter: Boolean = false,
     ) {
-        val history = store.history(msg.conversationId)
-        ensureSystemPrompt(history)
+        val history = contextManager.history(msg.conversationId)
 
-        // 记忆 recall
-        if (memoryStore != null && config.memoryEnabled) {
-            try {
-                val memories = memoryStore.recall(msg.content, msg.userId, config.memoryTopK)
-                if (memories.isNotEmpty()) {
-                    var budget = config.memoryTokenBudget
-                    val memSb = StringBuilder()
-                    memSb.appendLine("# Memory")
-                    for (memory in memories) {
-                        if (budget <= 0) break
-                        val line = "- [${memory.source}] ${memory.content}"
-                        val truncated = if (line.length > budget) line.take(budget) + "…" else line
-                        memSb.appendLine(truncated)
-                        budget -= truncated.length
-                    }
-                    val memoryText = memSb.toString().trimEnd()
-                    if (memoryText.contains("[")) {
-                        history.add(1, ChatMessage(role = ChatRole.System, content = memoryText))
-                    }
-                }
-            } catch (e: Exception) {
-                println("[Vicky] 记忆读取失败: ${e.message}")
-            }
+        // 确保 system prompt 存在且为最新
+        val prompt = contextManager.buildSystemPrompt(config.mode, tools)
+        if (history.isEmpty() || history.first().role != ChatRole.System) {
+            history.add(0, ChatMessage(role = ChatRole.System, content = prompt))
+        } else {
+            history[0] = ChatMessage(role = ChatRole.System, content = prompt)
         }
+
+        // 子类 recall 记忆注入
+        onTurnStart(msg, history)
 
         history += ChatMessage(role = ChatRole.User, content = msg.content)
 
@@ -235,7 +117,7 @@ abstract class Agent(
         }
 
         val oaiTools = if (config.mode.toolsEnabled) buildOpenAiTools() else emptyList()
-        compactor.ensureContextBudget(history)
+        contextManager.ensureContextBudget(history)
 
         var assistantReply: String? = null
 
@@ -293,8 +175,8 @@ abstract class Agent(
                     }
                     if (result.endTurn) endTurn = true
                 }
-                compactOldToolRounds(history)
-                compactor.ensureContextBudget(history)
+                contextManager.compactOldToolRounds(history)
+                contextManager.ensureContextBudget(history)
                 if (endTurn) {
                     log("step ${step + 1}: endTurn signaled, finishing turn")
                     return
@@ -334,43 +216,13 @@ abstract class Agent(
                 )
             }
         } finally {
-            // 无论如何都保存原始记忆
-            if (memoryStore != null && config.memoryEnabled) {
-                try {
-                    val rawMemories = mutableListOf<RawMemory>()
-                    rawMemories.add(
-                        RawMemory(
-                            userId = msg.userId,
-                            conversationId = msg.conversationId,
-                            role = "user",
-                            content = msg.content,
-                        )
-                    )
-                    if (assistantReply != null) {
-                        rawMemories.add(
-                            RawMemory(
-                                userId = msg.userId,
-                                conversationId = msg.conversationId,
-                                role = "assistant",
-                                content = assistantReply,
-                            )
-                        )
-                    }
-                    for (raw in rawMemories) {
-                        memoryStore.rememberRaw(raw)
-                    }
-                } catch (e: Exception) {
-                    println("[Vicky] 原始记忆保存失败 (${e::class.simpleName}): ${e.message}")
-                    if (config.debug) e.printStackTrace()
-                }
-            }
+            onTurnEnd(msg, assistantReply)
 
-            // 清理上下文
             if (clearContextAfter) {
-                store.clear(msg.conversationId)
+                contextManager.clear(msg.conversationId)
                 log("cleared context for '${msg.conversationId}' after reply")
             } else {
-                store.trimIfNeeded(msg.conversationId)
+                contextManager.trimIfNeeded(msg.conversationId)
             }
         }
     }
@@ -385,39 +237,9 @@ abstract class Agent(
         if (!authorizer.allow(msg.userId, toolName)) {
             return ToolResult(toAgent = "Error: permission denied for user '${msg.userId}' on tool '$toolName'.")
         }
-        val ctx = ToolContext(msg.userId, msg.conversationId, msg.groupId, store, tools, buffer)
+        val ctx = ToolContext(msg.userId, msg.conversationId, msg.groupId, contextManager, tools, buffer)
         return runCatching { tool.execute(ctx, args) }
             .getOrElse { ToolResult(toAgent = "Error executing '$toolName': ${it.message}") }
-    }
-
-    private fun compactOldToolRounds(history: MutableList<ChatMessage>) {
-        val roundStarts = history.withIndex()
-            .filter { (_, m) -> m.role == ChatRole.Assistant && !m.toolCalls.isNullOrEmpty() }
-            .map { it.index }
-        if (roundStarts.size <= KEEP_RECENT_TOOL_ROUNDS) return
-        val cutoff = roundStarts[roundStarts.size - KEEP_RECENT_TOOL_ROUNDS]
-        for (i in 0 until cutoff) {
-            val m = history[i]
-            if (m.role != ChatRole.Tool) continue
-            val original = m.content ?: continue
-            if (original.startsWith(SUMMARY_PREFIX)) continue
-            val status = if (original.trimStart().startsWith("Error")) "failed" else "ok"
-            history[i] = ChatMessage(
-                role = ChatRole.Tool,
-                toolCallId = m.toolCallId,
-                name = m.name,
-                content = "$SUMMARY_PREFIX${m.name ?: "tool"}: $status",
-            )
-        }
-    }
-
-    private fun ensureSystemPrompt(history: MutableList<ChatMessage>) {
-        val prompt = contextBuilder.systemPrompt(config.mode, tools)
-        if (history.isEmpty() || history.first().role != ChatRole.System) {
-            history.add(0, ChatMessage(role = ChatRole.System, content = prompt))
-        } else {
-            history[0] = ChatMessage(role = ChatRole.System, content = prompt)
-        }
     }
 
     /**
@@ -518,13 +340,5 @@ abstract class Agent(
 
     override fun close() {
         AgentManager.unregister(id)
-        distillationScheduler?.stop()
-        scope.cancel()
-        vectorStore?.close()
-    }
-
-    private companion object {
-        const val KEEP_RECENT_TOOL_ROUNDS = 2
-        const val SUMMARY_PREFIX = "[summary] "
     }
 }

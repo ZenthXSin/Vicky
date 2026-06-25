@@ -46,7 +46,7 @@ object BuiltinToolImpl {
 
     @VickyTool(name = "clear_context", description = "Clear the current conversation history/context. Takes effect from the next message.")
     fun clearContext(ctx: ToolContext): ToolResult {
-        ctx.store.clear(ctx.conversationId)
+        ctx.contextManager.clear(ctx.conversationId)
         return ToolResult(
             toAgent = "context cleared for conversation '${ctx.conversationId}'",
             userReply = "上下文已清除。",

@@ -12,4 +12,5 @@ pluginManagement {
 
 rootProject.name = "Vicky"
 
+include("src:main:vicky-core")
 include("src:main:vicky-ksp")

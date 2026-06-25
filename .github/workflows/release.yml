@@ -56,13 +56,15 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Next release: $TAG"
 
-      - name: Build Vicky.jar
-        run: ./gradlew shadowJar -Pversion=${{ steps.ver.outputs.version }} --no-daemon --stacktrace
+      - name: Build all modules
+        run: ./gradlew build -Pversion=${{ steps.ver.outputs.version }} --no-daemon --stacktrace
 
-      - name: Stage release artifact
+      - name: Stage release artifacts
         run: |
           mkdir -p release
           cp build/libs/Vicky-${{ steps.ver.outputs.version }}.jar "release/Vicky-${{ steps.ver.outputs.version }}.jar"
+          cp src/main/vicky-core/build/libs/vicky-core-${{ steps.ver.outputs.version }}.jar "release/vicky-core-${{ steps.ver.outputs.version }}.jar"
+          cp src/main/vicky-ksp/build/libs/vicky-ksp-${{ steps.ver.outputs.version }}.jar "release/vicky-ksp-${{ steps.ver.outputs.version }}.jar"
 
       - name: Create tag and GitHub Release
         uses: softprops/action-gh-release@v2
@@ -72,10 +74,12 @@ jobs:
           generate_release_notes: true
           files: |
             release/Vicky-${{ steps.ver.outputs.version }}.jar
+            release/vicky-core-${{ steps.ver.outputs.version }}.jar
+            release/vicky-ksp-${{ steps.ver.outputs.version }}.jar
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Publish to Maven Central
+      - name: Publish all modules to Maven Central
         run: ./gradlew publishAndReleaseToMavenCentral -Pversion=${{ steps.ver.outputs.version }} --no-daemon --stacktrace
         env:
           ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}

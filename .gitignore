@@ -6,6 +6,7 @@ build
 /other
 /config
 src/main/vicky-ksp/build/
+src/main/vicky-core/build/
 
 ### IntelliJ IDEA ###
 *.iws

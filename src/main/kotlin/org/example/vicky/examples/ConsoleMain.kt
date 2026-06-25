@@ -43,6 +43,7 @@ fun main() = runBlocking {
     }
 
     val agentConfig = ConfigManager.toAgentConfig(result.config, result.agentMd)
+    val memoryConfig = ConfigManager.toMemoryConfig(result.config)
     val oneBotConfig = result.config.oneBot
 
     println("[Vicky] 配置已加载: ${ConfigManager.getConfigDir().absolutePath}")
@@ -52,7 +53,7 @@ fun main() = runBlocking {
         result.config.skillStates,
     )
 
-    val oneBot = OneBot(agentConfig, oneBotConfig.url, oneBotConfig.token)
+    val oneBot = OneBot(agentConfig, memoryConfig, oneBotConfig.url, oneBotConfig.token)
 
     oneBot.connect()
 

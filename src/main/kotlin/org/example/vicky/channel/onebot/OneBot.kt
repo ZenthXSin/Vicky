@@ -1,5 +1,10 @@
 package org.example.vicky.channel.onebot
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import net.mamoe.mirai.Bot
 import net.mamoe.mirai.contact.Group
@@ -11,19 +16,70 @@ import net.mamoe.mirai.event.events.StrangerMessageEvent
 import net.mamoe.mirai.message.data.*
 import net.mamoe.mirai.message.data.Image.Key.queryUrl
 import net.mamoe.mirai.message.data.buildForwardMessage
+import com.aallam.openai.api.chat.ChatMessage
+import com.aallam.openai.api.chat.ChatRole
 import org.example.vicky.agent.Agent
 import org.example.vicky.agent.AgentConfig
+import org.example.vicky.agent.EmbeddingConfig
+import org.example.vicky.context.ContextBuilder
+import org.example.vicky.context.ContextCompactor
+import org.example.vicky.context.ContextManager
+import org.example.vicky.context.ConversationStore
+import org.example.vicky.context.DefaultContextManager
+import org.example.vicky.buffer.BufferedMessage
+import org.example.vicky.buffer.MessageBuffer
+import org.example.vicky.buffer.RichMediaItem
+import org.example.vicky.file.FileIndexService
 import org.example.vicky.generated.ToolRegistry
 import org.example.vicky.io.InboundMessage
 import org.example.vicky.io.MessageSink
 import org.example.vicky.io.OutboundMessage
+import org.example.vicky.llm.EmbeddingClientFactory
+import org.example.vicky.llm.OpenAiClientFactory
+import org.example.vicky.memory.Distiller
+import org.example.vicky.memory.DistillationScheduler
+import org.example.vicky.memory.QdrantMemoryStore
+import org.example.vicky.memory.RawMemory
 import org.example.vicky.tool.ToolAuthorizer
+import org.example.vicky.vector.QdrantVectorStore
 import top.mrxiaom.overflow.BotBuilder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
+/**
+ * 语义记忆扩展配置。
+ */
+data class MemoryConfig(
+    val embedding: EmbeddingConfig? = null,
+    val qdrantHost: String? = null,
+    val qdrantGrpcPort: Int = 6334,
+    val qdrantHttpPort: Int = 6333,
+    val memoryEnabled: Boolean = false,
+    val memoryTopK: Int = 5,
+    val memoryTokenBudget: Int = 800,
+    val memoryMaxPerUser: Int = 500,
+    val memoryExpiryDays: Int = 90,
+    val memoryRawRetentionDays: Int = 30,
+    val memoryDistilledRetentionDays: Int = 7,
+    val memoryCollection: String = "vicky_memories",
+    val memoryRawCollection: String = "vicky_memories_raw",
+    val distillationEnabled: Boolean = true,
+    val distillationSchedule: String = "0 2 * * *",
+    val distillationMaxConversations: Int = 10,
+    val distillationTemperature: Double = 0.1,
+    val distillationMaxTokens: Int = 1000,
+    val fileIndexEnabled: Boolean = false,
+    val fileIndexCollection: String = "vicky_files",
+    val fileIndexChunkSize: Int = 500,
+    val fileIndexChunkOverlap: Int = 50,
+    val fileIndexIgnorePatterns: List<String> = listOf(".git", ".gradle", "build", "node_modules", "config/tmp"),
+    val fileIndexPaths: List<String> = emptyList(),
+    val fileIndexAutoIndexOnStart: Boolean = true,
+)
+
 class OneBot(
     var agentConfig: AgentConfig,
+    var memoryConfig: MemoryConfig = MemoryConfig(),
     var url: String,
     var token: String,
 ) {
@@ -55,21 +111,20 @@ class OneBot(
     /** 连接并注册三个事件监听器。 */
     suspend fun connect(): Boolean {
         bot = BotBuilder.positive(url).token(token).connect() ?: return false
-        agent = OneBotAgent(agentConfig, bot!!, buffer, adminList, adminToolList)
-        // Initialize MiraiToolImpl with dependencies and register all mirai tools
+        // Initialize MiraiToolImpl before agent creation (initTools needs it)
         MiraiToolImpl.bot = bot!!
         MiraiToolImpl.messageSourceCache = messageSourceCache
         MiraiToolImpl.groupWhitelist = groupWhitelist
         MiraiToolImpl.onGroupWhitelistChanged = {
             onGroupWhitelistChanged?.invoke(groupWhitelist.toSet())
         }
-        ToolRegistry.tools("mirai").forEach { agent.registerTool(it) }
         // Register mirai L2 tool names as admin-gated
         listOf(
             "send_message", "group_manage", "friend_manage", "group_quit", "group_announcements",
             "file_write", "send_image", "send_video", "recall_message", "set_name_card",
             "essence_message", "group_files", "group_whitelist_add", "manage_tools", "manage_skills"
         ).forEach { adminToolList.add(it) }
+        agent = OneBotAgent(agentConfig, memoryConfig, bot!!, buffer, adminList, adminToolList)
         registerListeners()
         return true
     }
@@ -273,11 +328,172 @@ class OneBot(
 
     class OneBotAgent(
         config: AgentConfig,
+        private val memConfig: MemoryConfig,
         private val bot: Bot,
         override val buffer: MessageBuffer,
         private val adminList: Set<String>,
         private val adminToolList: Set<String>,
     ) : Agent(config) {
+
+        override val contextManager: ContextManager = DefaultContextManager(
+            store = ConversationStore(
+                maxConversations = config.conversationStoreMaxConversations,
+                maxMessages = config.conversationStoreMaxMessages,
+            ),
+            builder = ContextBuilder(config.agentMd),
+            compactor = ContextCompactor(config, OpenAiClientFactory.create(config)),
+        )
+
+        private var toolManagementTool: org.example.vicky.tool.builtin.ToolManagementTool? = null
+        private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+
+        // 语义记忆组件
+        private var vectorStore: QdrantVectorStore? = null
+        private var memoryStore: QdrantMemoryStore? = null
+        private var fileIndexService: FileIndexService? = null
+        private var distillationScheduler: DistillationScheduler? = null
+
+        override fun initMemory() {
+            val embeddingClient = memConfig.embedding?.let { EmbeddingClientFactory.create(it) }
+            if (embeddingClient != null) {
+                val dimText = if (embeddingClient.dimension > 0) "维度: ${embeddingClient.dimension}" else "维度: 待首次调用确定"
+                println("[Vicky] 语义模型已加载（$dimText）")
+            }
+
+            if (memConfig.qdrantHost != null && embeddingClient != null) {
+                try {
+                    vectorStore = QdrantVectorStore(memConfig.qdrantHost, memConfig.qdrantHttpPort)
+                    println("[Vicky] 向量存储已连接: ${memConfig.qdrantHost}:${memConfig.qdrantHttpPort}")
+                } catch (e: Exception) {
+                    println("[Vicky] Qdrant 连接失败: ${e.message}")
+                    println("[Vicky] 记忆功能已禁用")
+                }
+            }
+
+            if (vectorStore != null && embeddingClient != null) {
+                memoryStore = QdrantMemoryStore(vectorStore!!, embeddingClient, memConfig.memoryCollection, memConfig.memoryRawCollection)
+                println("[Vicky] 记忆系统已启用（topK: ${memConfig.memoryTopK}, tokenBudget: ${memConfig.memoryTokenBudget}）")
+
+                if (memConfig.fileIndexEnabled) {
+                    fileIndexService = FileIndexService(
+                        vectorStore!!, embeddingClient,
+                        java.io.File(System.getProperty("user.dir")),
+                        memConfig.fileIndexCollection,
+                        memConfig.fileIndexChunkSize,
+                        memConfig.fileIndexChunkOverlap,
+                        memConfig.fileIndexIgnorePatterns,
+                        memConfig.fileIndexPaths,
+                    )
+                }
+
+                if (memConfig.distillationEnabled) {
+                    val openAi = org.example.vicky.llm.OpenAiClientFactory.create(config)
+                    val distiller = Distiller(openAi, embeddingClient)
+                    distillationScheduler = DistillationScheduler(memoryStore!!, distiller, memConfig.distillationMaxConversations, true)
+                }
+            }
+
+            // 启动时后台自动索引文件
+            if (fileIndexService != null && memConfig.fileIndexAutoIndexOnStart) {
+                println("[Vicky] 开始后台索引文件...")
+                scope.launch(Dispatchers.IO) {
+                    try {
+                        val result = fileIndexService!!.indexAll { current, success, skipped ->
+                            print("\r[Vicky] 索引中: 已处理 $current 个文件，$success 个已索引，$skipped 个已跳过")
+                        }
+                        println("\n[Vicky] 文件索引完成: ${result.newFiles} 个新增，${result.updatedFiles} 个更新，${result.skippedFiles} 个跳过")
+                    } catch (e: Exception) {
+                        println("\n[Vicky] 文件索引失败: ${e.message}")
+                    }
+                }
+            }
+
+            // 启动蒸馏调度器
+            if (distillationScheduler != null) {
+                distillationScheduler!!.start()
+                println("[Vicky] 蒸馏调度器已启动")
+            }
+        }
+
+        override fun initTools() {
+            super.initTools()
+            if (config.builtinTools) {
+                val baseDir = java.io.File(System.getProperty("user.dir"))
+                org.example.vicky.tool.builtin.BuiltinTools.all(baseDir, memoryStore, fileIndexService, distillationScheduler)
+                    .forEach { tools.register(it) }
+                toolManagementTool = org.example.vicky.tool.builtin.ToolManagementTool { onToolStatesChanged() }
+                tools.register(toolManagementTool!!)
+                tools.register(org.example.vicky.tool.builtin.InvokeSkillTool())
+                tools.register(org.example.vicky.tool.builtin.ManageSkillsTool { onSkillStatesChanged() })
+                for ((toolName, enabled) in config.toolStates) {
+                    if (!enabled) tools.unregister(toolName)
+                }
+            }
+            ToolRegistry.tools("mirai").forEach { tools.register(it) }
+        }
+
+        override suspend fun onTurnStart(msg: InboundMessage, history: MutableList<ChatMessage>) {
+            if (memoryStore == null || !memConfig.memoryEnabled) return
+            try {
+                val memories = memoryStore!!.recall(msg.content, msg.userId, memConfig.memoryTopK)
+                if (memories.isNotEmpty()) {
+                    var budget = memConfig.memoryTokenBudget
+                    val memSb = StringBuilder()
+                    memSb.appendLine("# Memory")
+                    for (memory in memories) {
+                        if (budget <= 0) break
+                        val line = "- [${memory.source}] ${memory.content}"
+                        val truncated = if (line.length > budget) line.take(budget) + "…" else line
+                        memSb.appendLine(truncated)
+                        budget -= truncated.length
+                    }
+                    val memoryText = memSb.toString().trimEnd()
+                    if (memoryText.contains("[")) {
+                        history.add(1, ChatMessage(role = ChatRole.System, content = memoryText))
+                    }
+                }
+            } catch (e: Exception) {
+                println("[Vicky] 记忆读取失败: ${e.message}")
+            }
+        }
+
+        override suspend fun onTurnEnd(msg: InboundMessage, assistantReply: String?) {
+            if (memoryStore == null || !memConfig.memoryEnabled) return
+            try {
+                val rawMemories = mutableListOf<RawMemory>()
+                rawMemories.add(RawMemory(userId = msg.userId, conversationId = msg.conversationId, role = "user", content = msg.content))
+                if (assistantReply != null) {
+                    rawMemories.add(RawMemory(userId = msg.userId, conversationId = msg.conversationId, role = "assistant", content = assistantReply))
+                }
+                for (raw in rawMemories) {
+                    memoryStore!!.rememberRaw(raw)
+                }
+            } catch (e: Exception) {
+                println("[Vicky] 原始记忆保存失败 (${e::class.simpleName}): ${e.message}")
+                if (config.debug) e.printStackTrace()
+            }
+        }
+
+        override fun onToolStatesChanged() {
+            val activeStates = tools.snapshot().filter { it.name != "manage_tools" }.map { it.name to true }
+            val disabledStates = toolManagementTool?.getDisabledToolNames().orEmpty().map { it to false }
+            val allStates = (activeStates + disabledStates).toMap()
+            val configData = org.example.vicky.config.ConfigManager.loadOrCreate().config
+            org.example.vicky.config.ConfigManager.save(configData.copy(toolStates = allStates))
+        }
+
+        override fun onSkillStatesChanged() {
+            val states = org.example.vicky.skill.SkillManager.getStates()
+            val configData = org.example.vicky.config.ConfigManager.loadOrCreate().config
+            org.example.vicky.config.ConfigManager.save(configData.copy(skillStates = states))
+        }
+
+        override fun close() {
+            super.close()
+            distillationScheduler?.stop()
+            scope.cancel()
+            vectorStore?.close()
+        }
 
         private suspend fun sendSmart(target: net.mamoe.mirai.contact.Contact, text: String) {
             if (text.length > 100) {
