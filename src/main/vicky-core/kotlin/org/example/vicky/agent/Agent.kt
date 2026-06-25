@@ -35,9 +35,10 @@ abstract class Agent(
     val name: String? get() = config.name
     private var cachedOaiTools: List<OAITool>? = null
 
+    private var memoryInitialized = false
+
     init {
         AgentManager.register(this)
-        initMemory()
         initTools()
     }
 
@@ -88,6 +89,10 @@ abstract class Agent(
         replySink: MessageSink? = null,
         clearContextAfter: Boolean = false,
     ) {
+        if (!memoryInitialized) {
+            memoryInitialized = true
+            initMemory()
+        }
         val history = contextManager.history(msg.conversationId)
 
         // 确保 system prompt 存在且为最新
