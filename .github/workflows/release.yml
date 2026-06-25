@@ -14,24 +14,15 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  resolve-version:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Grant execute permission for gradlew
-        run: chmod +x ./gradlew
 
       - name: Resolve next version
         id: ver
@@ -56,33 +47,131 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Next release: $TAG"
 
-      - name: Build all modules
-        run: ./gradlew build -Pversion=${{ steps.ver.outputs.version }} --no-daemon --stacktrace
+  publish-vicky-core:
+    needs: resolve-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Stage release artifacts
-        run: |
-          mkdir -p release
-          cp build/libs/Vicky-${{ steps.ver.outputs.version }}.jar "release/Vicky-${{ steps.ver.outputs.version }}.jar"
-          cp src/main/vicky-core/build/libs/vicky-core-${{ steps.ver.outputs.version }}.jar "release/vicky-core-${{ steps.ver.outputs.version }}.jar"
-          cp src/main/vicky-ksp/build/libs/vicky-ksp-${{ steps.ver.outputs.version }}.jar "release/vicky-ksp-${{ steps.ver.outputs.version }}.jar"
-
-      - name: Create tag and GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
         with:
-          tag_name: ${{ steps.ver.outputs.tag }}
-          name: ${{ steps.ver.outputs.tag }}
-          generate_release_notes: true
-          files: |
-            release/Vicky-${{ steps.ver.outputs.version }}.jar
-            release/vicky-core-${{ steps.ver.outputs.version }}.jar
-            release/vicky-ksp-${{ steps.ver.outputs.version }}.jar
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          distribution: temurin
+          java-version: '21'
 
-      - name: Publish all modules to Maven Central
-        run: ./gradlew publishAndReleaseToMavenCentral -Pversion=${{ steps.ver.outputs.version }} --no-daemon --stacktrace
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x ./gradlew
+
+      - name: Build vicky-core
+        run: ./gradlew :src:main:vicky-core:build -Pversion=${{ needs.resolve-version.outputs.version }} --no-daemon --stacktrace
+
+      - name: Upload vicky-core JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: vicky-core
+          path: src/main/vicky-core/build/libs/vicky-core-${{ needs.resolve-version.outputs.version }}.jar
+
+      - name: Publish vicky-core to Maven Central
+        run: ./gradlew :src:main:vicky-core:publishAndReleaseToMavenCentral -Pversion=${{ needs.resolve-version.outputs.version }} --no-daemon --stacktrace
         env:
           ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
           ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
           ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
+
+  publish-vicky-ksp:
+    needs: resolve-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x ./gradlew
+
+      - name: Build vicky-ksp
+        run: ./gradlew :src:main:vicky-ksp:build -Pversion=${{ needs.resolve-version.outputs.version }} --no-daemon --stacktrace
+
+      - name: Upload vicky-ksp JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: vicky-ksp
+          path: src/main/vicky-ksp/build/libs/vicky-ksp-${{ needs.resolve-version.outputs.version }}.jar
+
+      - name: Publish vicky-ksp to Maven Central
+        run: ./gradlew :src:main:vicky-ksp:publishAndReleaseToMavenCentral -Pversion=${{ needs.resolve-version.outputs.version }} --no-daemon --stacktrace
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
+
+  publish-vicky:
+    needs: [resolve-version, publish-vicky-core]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x ./gradlew
+
+      - name: Build Vicky (shadowJar)
+        run: ./gradlew :shadowJar -Pversion=${{ needs.resolve-version.outputs.version }} --no-daemon --stacktrace
+
+      - name: Upload Vicky JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: vicky
+          path: build/libs/Vicky-${{ needs.resolve-version.outputs.version }}.jar
+
+      - name: Publish Vicky to Maven Central
+        run: ./gradlew :publishAndReleaseToMavenCentral -Pversion=${{ needs.resolve-version.outputs.version }} --no-daemon --stacktrace
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
+
+  github-release:
+    needs: [resolve-version, publish-vicky-core, publish-vicky-ksp, publish-vicky]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release
+
+      - name: Flatten JARs
+        run: |
+          mkdir -p jars
+          find release -name "*.jar" -exec cp {} jars/ \;
+
+      - name: Create tag and GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve-version.outputs.tag }}
+          name: ${{ needs.resolve-version.outputs.tag }}
+          generate_release_notes: true
+          files: jars/*.jar
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
