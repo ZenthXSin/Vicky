@@ -7,6 +7,14 @@ import com.aallam.openai.api.model.ModelId
  *
  * 语义记忆、向量存储、Embedding、文件索引等扩展配置由子类自行管理。
  */
+data class McpServerConfig(
+    val name: String,
+    val transport: String = "stdio", // "stdio" 或 "http"
+    val command: String = "",        // stdio 模式：可执行命令
+    val args: List<String> = emptyList(), // stdio 模式：命令参数
+    val url: String = "",            // http 模式：服务器地址
+)
+
 data class AgentConfig(
     val model: ModelId,
     val apiKey: String,
@@ -22,6 +30,8 @@ data class AgentConfig(
     val streaming: Boolean = true,
     val builtinTools: Boolean = true,
     val toolStates: Map<String, Boolean> = emptyMap(),
+    // MCP 服务器配置
+    val mcpServers: List<McpServerConfig> = emptyList(),
     // 会话存储限制
     val conversationStoreMaxConversations: Int = 500,
     val conversationStoreMaxMessages: Int = 200,

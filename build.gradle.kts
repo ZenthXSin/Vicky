@@ -62,6 +62,7 @@ tasks.build {
 
 tasks.test {
     useJUnitPlatform()
+    failOnNoDiscoveredTests = false
 }
 
 mavenPublishing {

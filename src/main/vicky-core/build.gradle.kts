@@ -23,6 +23,9 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
+    implementation("io.modelcontextprotocol:kotlin-sdk-client:0.13.0")
+    implementation("io.ktor:ktor-client-cio:3.1.0")
+
     implementation("ch.qos.logback:logback-classic:1.5.13")
 }
 
