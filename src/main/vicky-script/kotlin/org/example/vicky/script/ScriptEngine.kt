@@ -70,6 +70,7 @@ class ScriptEngine {
         try {
             ctx.optimizationLevel = -1
             val scope = ctx.initStandardObjects()
+            injectPrintln(ctx, scope)
             ClassAutoRegistry.injectAll(ctx, scope)
 
             // 注入 Promise polyfill（Rhino 原生不支持 Promise，TS async 编译产物需要它）
@@ -319,6 +320,27 @@ class ScriptEngine {
         } catch (e: Exception) {
             mapOf("toAgent" to "Error: ${e.message}", "error" to true)
         }
+    }
+
+    /** 注入 println / print 到脚本 scope（Rhino 1.8 initStandardObjects 不含 shell 函数）。 */
+    private fun injectPrintln(ctx: Context, scope: ScriptableObject) {
+        val out = System.out
+        val printlnFn = object : BaseFunction() {
+            override fun call(cx: Context, s: Scriptable, thisObj: Scriptable, args: Array<out Any?>): Any? {
+                val line = args.joinToString(" ") { if (it == Undefined.instance) "undefined" else Context.toString(it) }
+                out.println(line)
+                return Undefined.instance
+            }
+        }
+        val printFn = object : BaseFunction() {
+            override fun call(cx: Context, s: Scriptable, thisObj: Scriptable, args: Array<out Any?>): Any? {
+                val line = args.joinToString(" ") { if (it == Undefined.instance) "undefined" else Context.toString(it) }
+                out.print(line)
+                return Undefined.instance
+            }
+        }
+        ScriptableObject.putProperty(scope, "println", printlnFn)
+        ScriptableObject.putProperty(scope, "print", printFn)
     }
 
     /**

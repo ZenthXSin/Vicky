@@ -5,13 +5,13 @@ import org.example.vicky.annotations.ToolGroup
 import org.example.vicky.annotations.ToolParam
 import org.example.vicky.annotations.VickyTool
 import org.example.vicky.channel.onebot.OneBot
+import org.example.vicky.command.CommandContext
+import org.example.vicky.command.CommandRegistry
 import org.example.vicky.config.ConfigManager
-import org.example.vicky.generated.ToolRegistry
 import org.example.vicky.io.InboundMessage
+import org.example.vicky.io.MessageSink
 import org.example.vicky.io.OutboundMessage
 import org.example.vicky.tool.ToolResult
-import java.net.InetSocketAddress
-import java.net.Socket
 
 @ToolGroup(name = "Vicky")
 object ConsoleTools {
@@ -71,25 +71,47 @@ fun main() = runBlocking {
     }
 
     val agent = oneBot.agent
+    val commandRegistry = oneBot.commandRegistry
 
-    //ToolRegistry.tools("Vicky").forEach { agent.registerTool(it) }
-    //ToolRegistry.tools("mindustry").forEach { agent.registerTool(it) }
+    // ─── 控制台命令注册 ───
+    // TODO: 在此注册控制台专用命令
 
-    println("Vicky console agent. Type 'quit' to exit.")
+    val consoleSink = MessageSink { out ->
+        when (out) {
+            is OutboundMessage.AgentReply -> println("[agent] ${out.content}")
+            is OutboundMessage.ToolReply -> println("[tool:${out.toolName}] ${out.content}")
+            is OutboundMessage.Debug -> println("[debug] ${out.content}")
+            is OutboundMessage.Think -> println("[think] ${out.content}")
+        }
+    }
+
+    println("Vicky console agent. Type 'quit' to exit. Commands start with '/'.")
+
     while (true) {
         print("> ")
         val line = readlnOrNull()?.trim() ?: break
         if (line == "quit") break
         if (line.isEmpty()) continue
-        agent.receive(clearContextAfter = true,
+
+        // 命令分发：/ 开头走命令系统，其余走 Agent
+        val ctx = CommandContext(
+            userId = "488254306",
+            conversationId = "488254306",
+            sink = consoleSink,
+        )
+        val cmdResult = commandRegistry.dispatch(ctx, line)
+
+        if (cmdResult != null) {
+            // 命令已处理
+            cmdResult.reply?.let { println(it) }
+            // passthrough = true 时仍把原始输入送给 Agent
+            if (!cmdResult.passthrough) continue
+        }
+
+        agent.receive(
+            clearContextAfter = true,
             msg = InboundMessage(userId = "488254306", content = line),
-            replySink = {
-            when (it) {
-                is OutboundMessage.AgentReply -> println("[agent] ${it.content}")
-                is OutboundMessage.ToolReply -> println("[tool:${it.toolName}] ${it.content}")
-                is OutboundMessage.Debug -> println("[debug] ${it.content}")
-                is OutboundMessage.Think -> println("[think] ${it.content}")
-            }
-        })
+            replySink = consoleSink,
+        )
     }
 }

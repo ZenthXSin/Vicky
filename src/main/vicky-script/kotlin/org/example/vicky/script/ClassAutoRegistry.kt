@@ -90,8 +90,38 @@ object ClassAutoRegistry {
                 classMap.putIfAbsent(cls.simpleName, cls)
             }
             scanPackage("org.example.vicky")
-            scanPackage("kotlinx.serialization.json")
+            // Java stdlib（java.lang 跳过，避免 Object/String/Map 等覆盖 JS 内置对象）
+            scanPackage("java.io")
+            scanPackage("java.nio")
+            scanPackage("java.nio.file")
+            scanPackage("java.nio.channels")
+            scanPackage("java.nio.charset")
             scanPackage("java.util")
+            scanPackage("java.util.concurrent")
+            scanPackage("java.util.concurrent.atomic")
+            scanPackage("java.util.concurrent.locks")
+            scanPackage("java.util.function")
+            scanPackage("java.util.stream")
+            scanPackage("java.util.regex")
+            scanPackage("java.math")
+            scanPackage("java.net")
+            scanPackage("java.text")
+            scanPackage("java.time")
+            scanPackage("java.security")
+            // Kotlin stdlib
+            scanPackage("kotlin")
+            scanPackage("kotlin.annotation")
+            scanPackage("kotlin.collections")
+            scanPackage("kotlin.comparisons")
+            scanPackage("kotlin.io")
+            scanPackage("kotlin.ranges")
+            scanPackage("kotlin.sequences")
+            scanPackage("kotlin.text")
+            scanPackage("kotlin.time")
+            // Kotlinx
+            scanPackage("kotlinx.serialization.json")
+            scanPackage("kotlinx.coroutines")
+            scanPackage("kotlinx.coroutines.sync")
             initialized = true
             println("[Vicky][script] ClassAutoRegistry 已初始化: ${classMap.size} 个类可用")
         }
@@ -148,9 +178,28 @@ object ClassAutoRegistry {
 
     // ─── 注入 ────────────────────────────────────────────────
 
+    /** JavaScript 内置对象名，注入会破坏 Rhino 原型链。 */
+    private val JS_RESERVED = setOf(
+        "Object", "Function", "Array", "String", "Number", "Boolean", "Symbol",
+        "Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError",
+        "RegExp", "Date", "Math", "JSON", "Map", "Set", "WeakMap", "WeakSet",
+        "Promise", "Proxy", "Reflect", "Intl", "Console",
+        "Iterator", "Generator", "GeneratorFunction", "AsyncFunction",
+        "ArrayBuffer", "DataView", "Float32Array", "Float64Array",
+        "Int8Array", "Int16Array", "Int32Array", "Uint8Array", "Uint16Array",
+        "Uint32Array", "Uint8ClampedArray",
+        "URIError", "EvalError", "NaN", "Infinity", "undefined",
+        "eval", "isFinite", "isNaN", "parseFloat", "parseInt",
+        "decodeURI", "decodeURIComponent", "encodeURI", "encodeURIComponent",
+        "Java", "Packages", "java", "javax", "org", "com", "edu", "net",
+        "println", "print", "quit", "exit", "load", "loadClass",
+    )
+
     private fun injectClass(ctx: Context, scope: ScriptableObject, name: String, cls: Class<*>) {
         // 跳过非 public 类和内部类（如 kotlinx.serialization 的 Tombstone、JsonLiteralSerializer 等）
         if (!Modifier.isPublic(cls.modifiers) || cls.isSynthetic || cls.isAnonymousClass) return
+        // 跳过 JS 内置名，避免覆盖 Rhino 原型链
+        if (name in JS_RESERVED) return
         try {
             // 检测 Kotlin object 单例（INSTANCE 字段）
             val instanceField = cls.declaredFields.firstOrNull {
@@ -315,9 +364,10 @@ object ClassAutoRegistry {
         }
     }
 
-    /** 判断类是否应该注册：public、非合成、非匿名、非本地。 */
+    /** 判断类是否应该注册：public、非合成、非匿名、非本地、非编译器生成。 */
     private fun shouldRegister(cls: Class<*>): Boolean =
         cls.simpleName.isNotEmpty() &&
+            !cls.simpleName.contains('$') &&
             Modifier.isPublic(cls.modifiers) &&
             !cls.isSynthetic &&
             !cls.isAnonymousClass &&

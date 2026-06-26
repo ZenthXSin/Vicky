@@ -20,6 +20,8 @@ import com.aallam.openai.api.chat.ChatMessage
 import com.aallam.openai.api.chat.ChatRole
 import org.example.vicky.agent.Agent
 import org.example.vicky.agent.AgentConfig
+import org.example.vicky.command.CommandContext
+import org.example.vicky.command.CommandRegistry
 import org.example.vicky.agent.EmbeddingConfig
 import org.example.vicky.context.ContextBuilder
 import org.example.vicky.context.ContextCompactor
@@ -87,6 +89,7 @@ class OneBot(
     val adminToolList = mutableSetOf<String>()
     val groupWhitelist = mutableSetOf<String>()
     val userWhitelist = mutableSetOf<String>()
+    val commandRegistry = CommandRegistry()
 
     /** 当群白名单因管理员指令变更时回调，外部用来持久化到 config.json。 */
     var onGroupWhitelistChanged: ((Set<String>) -> Unit)? = null
@@ -195,51 +198,115 @@ class OneBot(
             )
         }
 
-        // 监听器B: 群消息 → 检测 @Bot → 触发 Agent
+        // 监听器B: 群消息 → 检测 @Bot → 命令分发 / 触发 Agent
         channel.subscribeAlways<GroupMessageEvent> {
             if (!isBotMentioned(message, b)) return@subscribeAlways
             if (group.id.toString() !in groupWhitelist && sender.id.toString() !in adminList) return@subscribeAlways
 
+            val rawText = message.content
+            val conversationId = group.id.toString()
+            val userId = sender.id.toString()
+            val groupId = group.id.toString()
+
+            // 命令分发
+            val cmdResult = commandRegistry.dispatch(
+                CommandContext(userId, conversationId, groupId, buildContactSink(userId, groupId)),
+                rawText,
+            )
+            if (cmdResult != null) {
+                cmdResult.reply?.let { group.sendMessage(it) }
+                if (!cmdResult.passthrough) return@subscribeAlways
+            }
+
             val inbound = buildInboundFromBuffer(
-                conversationId = group.id.toString(),
-                userId = sender.id.toString(),
-                groupId = group.id.toString(),
+                conversationId = conversationId,
+                userId = userId,
+                groupId = groupId,
                 groupName = group.name,
-                currentText = message.content,
+                currentText = rawText,
                 senderName = sender.nameCardOrNick,
             )
             println("[→Agent] $inbound")
             agent.receive(inbound)
         }
 
-        // 监听器C: 好友消息 → 全部触发 Agent
+        // 监听器C: 好友消息 → 命令分发 / 触发 Agent
         channel.subscribeAlways<FriendMessageEvent> {
             if (sender.id.toString() !in userWhitelist && sender.id.toString() !in adminList) return@subscribeAlways
+
+            val rawText = message.content
+            val userId = sender.id.toString()
+            val conversationId = userId
+
+            // 命令分发
+            val cmdResult = commandRegistry.dispatch(
+                CommandContext(userId, conversationId, sink = buildContactSink(userId, "")),
+                rawText,
+            )
+            if (cmdResult != null) {
+                val contact = bot.getFriend(sender.id) ?: bot.getStranger(sender.id)
+                contact?.sendMessage(cmdResult.reply ?: return@subscribeAlways)
+                if (!cmdResult.passthrough) return@subscribeAlways
+            }
+
             val inbound = buildInboundFromBuffer(
-                conversationId = sender.id.toString(),
-                userId = sender.id.toString(),
+                conversationId = conversationId,
+                userId = userId,
                 groupId = "",
                 groupName = "",
-                currentText = message.content,
+                currentText = rawText,
                 senderName = sender.nick,
             )
             println("[→Agent] $inbound")
             agent.receive(inbound)
         }
 
-        // 监听器D: 陌生人/临时会话消息 → 全部触发 Agent
+        // 监听器D: 陌生人/临时会话消息 → 命令分发 / 触发 Agent
         channel.subscribeAlways<StrangerMessageEvent> {
             if (sender.id.toString() !in userWhitelist && sender.id.toString() !in adminList) return@subscribeAlways
+
+            val rawText = message.content
+            val userId = sender.id.toString()
+            val conversationId = userId
+
+            // 命令分发
+            val cmdResult = commandRegistry.dispatch(
+                CommandContext(userId, conversationId, sink = buildContactSink(userId, "")),
+                rawText,
+            )
+            if (cmdResult != null) {
+                val contact = bot.getFriend(sender.id) ?: bot.getStranger(sender.id)
+                contact?.sendMessage(cmdResult.reply ?: return@subscribeAlways)
+                if (!cmdResult.passthrough) return@subscribeAlways
+            }
+
             val inbound = buildInboundFromBuffer(
-                conversationId = sender.id.toString(),
-                userId = sender.id.toString(),
+                conversationId = conversationId,
+                userId = userId,
                 groupId = "",
                 groupName = "",
-                currentText = message.content,
+                currentText = rawText,
                 senderName = sender.nick,
             )
             println("[→Agent] $inbound")
             agent.receive(inbound)
+        }
+    }
+
+    // endregion
+
+    // region 命令 sink
+
+    /** 构建一个 MessageSink，将消息路由回对应用户/群。 */
+    private fun buildContactSink(userId: String, groupId: String): MessageSink = MessageSink { out ->
+        val text = out.content
+        when {
+            groupId.isNotEmpty() -> bot?.getGroup(groupId.toLongOrNull() ?: return@MessageSink)?.sendMessage(text)
+            else -> {
+                val uid = userId.toLongOrNull() ?: return@MessageSink
+                val contact = bot?.getFriend(uid) ?: bot?.getStranger(uid)
+                contact?.sendMessage(text)
+            }
         }
     }
 
