@@ -3,10 +3,12 @@ package org.example.vicky.script
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import org.mozilla.javascript.BaseFunction
 import org.mozilla.javascript.Context
 import org.mozilla.javascript.EcmaError
 import org.mozilla.javascript.EvaluatorException
 import org.mozilla.javascript.Function
+import org.mozilla.javascript.Scriptable
 import org.mozilla.javascript.ScriptableObject
 import org.mozilla.javascript.Undefined
 
@@ -178,6 +180,37 @@ class ScriptEngine {
         ScriptableObject.putProperty(jsCtx, "userId", toolCtx.userId)
         ScriptableObject.putProperty(jsCtx, "conversationId", toolCtx.conversationId)
         ScriptableObject.putProperty(jsCtx, "groupId", toolCtx.groupId)
+
+        // 注入 sendMessage(groupId, text) — 通过 MiraiToolImpl.bot 发送群消息
+        val sendMsgFn = object : BaseFunction() {
+            override fun call(cx: Context, s: Scriptable, thisObj: Scriptable, args: Array<out Any?>): Any? {
+                if (args.size < 2) return "error: sendMessage requires (groupId, text)"
+                val groupIdStr = Context.toString(args[0])
+                val text = Context.toString(args[1])
+                return try {
+                    val miraiClass = Class.forName("org.example.vicky.channel.onebot.MiraiToolImpl")
+                    val instanceField = miraiClass.getDeclaredField("INSTANCE")
+                    val instance = instanceField.get(null)
+                    val bot = miraiClass.getMethod("getBot").invoke(instance)
+                    if (bot == null) {
+                        "error: Bot 未连接"
+                    } else {
+                        val botClass = bot.javaClass
+                        val getGroup = botClass.getMethod("getGroup", Long::class.javaPrimitiveType)
+                        val group = getGroup.invoke(bot, groupIdStr.toLong())
+                        if (group == null) {
+                            "error: 群不存在: $groupIdStr"
+                        } else {
+                            group.javaClass.getMethod("sendMessage", String::class.java).invoke(group, text)
+                            "sent to group $groupIdStr"
+                        }
+                    }
+                } catch (e: Exception) {
+                    "error: ${e.message}"
+                }
+            }
+        }
+        ScriptableObject.putProperty(jsCtx, "sendMessage", sendMsgFn)
 
         var result = fn.call(ctx, scope, scope, arrayOf(jsCtx, jsArgs))
 

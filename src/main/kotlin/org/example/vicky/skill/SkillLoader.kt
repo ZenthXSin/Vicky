@@ -19,6 +19,7 @@ object SkillLoader {
         dirByName.clear()
         SkillManager.clear()
         scan(rootDir, persistedStates)
+        logStats()
     }
 
     /** 重新扫描。保留禁用状态。 */
@@ -75,6 +76,10 @@ object SkillLoader {
                 SkillManager.register(Skill(name, description, parsed.body, group = group, enabled = enabled))
             }
         }
+    }
+
+    /** 打印当前技能统计日志。 */
+    fun logStats() {
         val activeCount = SkillManager.all().size
         val totalCount = SkillManager.allIncludingDisabled().size
         val disabledCount = totalCount - activeCount

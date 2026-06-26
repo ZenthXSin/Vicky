@@ -48,6 +48,7 @@ async function execute(ctx: any, args: any): Promise<any> {
     // ctx.userId   — 调用者 ID
     // ctx.conversationId — 会话 ID
     // ctx.groupId  — 群聊 ID（如果有）
+    // ctx.sendMessage(groupId, text) — 主动发送群消息（见示例 12）
 
     return {
         toAgent: "返回给 AI 的内容（必填）",
@@ -534,7 +535,7 @@ async function execute(ctx: any, args: any): Promise<any> {
 
 ```typescript
 var name: string = "send_group_msg";
-var description: string = "通过 Mirai Bot 直接发送群消息";
+var description: string = "发送群消息";
 var parameters = {
     type: "object",
     properties: {
@@ -545,17 +546,14 @@ var parameters = {
 };
 
 async function execute(ctx: any, args: any): Promise<any> {
-    // MiraiToolImpl 是 Kotlin object，.bot 字段持有 Mirai Bot 实例
-    var bot = MiraiToolImpl.bot;
-    if (bot == null) {
-        return { toAgent: "error: Bot 未连接" };
-    }
-    var group = bot.getGroup(java.lang.Long.parseLong(args.groupId));
-    if (group == null) {
-        return { toAgent: "error: 群不存在: " + args.groupId };
-    }
-    group.sendMessage(args.text);
-    return { toAgent: "sent to group " + args.groupId, userReply: "已发送。" };
+    // 方式 1：用 ctx.sendMessage（推荐，简单）
+    var result = ctx.sendMessage(args.groupId, args.text);
+    return { toAgent: result };
+
+    // 方式 2：直接操作 Mirai Bot（更灵活，可调用全部 Mirai API）
+    // var bot = MiraiToolImpl.bot;
+    // var group = bot.getGroup(java.lang.Long.parseLong(args.groupId));
+    // group.sendMessage(args.text);
 }
 ```
 
@@ -601,6 +599,58 @@ function onUnload() {
     java.lang.System.out.println("[startup] 清理完成");
 }
 ```
+
+### 示例 15：定时任务 — Timer + 主动发消息
+
+```typescript
+var name: string = "scheduled_msg";
+var description: string = "定时发送群消息插件";
+var parameters = { type: "object", properties: {} };
+
+var timer: any = null;
+
+function onLoad() {
+    var Timer = Java.type("java.util.Timer");
+    var TimerTask = Java.type("java.util.TimerTask");
+
+    timer = new Timer("scheduled-msg", true); // daemon = true
+
+    var task = new (TimerTask.extend({
+        run: function() {
+            try {
+                // onLoad 回调中没有 ctx，用 MiraiToolImpl.bot 直接发消息
+                var bot = MiraiToolImpl.bot;
+                if (bot == null) return;
+                var group = bot.getGroup(java.lang.Long.parseLong("123456789"));
+                if (group != null) group.sendMessage("定时消息：系统运行正常");
+            } catch (e) {
+                java.lang.System.out.println("[scheduled] error: " + e);
+            }
+        }
+    }));
+
+    // 延迟 0ms 开始，每 60000ms（1分钟）执行一次
+    timer.schedule(task, 0, 60000);
+    java.lang.System.out.println("[scheduled] 定时任务已启动");
+}
+
+function onUnload() {
+    if (timer != null) {
+        timer.cancel();
+        java.lang.System.out.println("[scheduled] 定时任务已停止");
+    }
+}
+
+async function execute(ctx: any, args: any): Promise<any> {
+    // execute 中可以用 ctx.sendMessage（框架注入，更简洁）
+    // 也可以用 MiraiToolImpl.bot（更灵活，可调用全部 Mirai API）
+    return { toAgent: "定时任务插件运行中" };
+}
+```
+
+> **`ctx.sendMessage` vs `MiraiToolImpl.bot`**：
+> - `ctx.sendMessage(groupId, text)` — 只在 `execute()` 中可用，简单快捷
+> - `MiraiToolImpl.bot` — 任何地方都可用（包括 `onLoad`、Timer 回调），可调用全部 Mirai API
 
 ---
 

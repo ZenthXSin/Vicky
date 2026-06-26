@@ -23,6 +23,8 @@ import java.util.ArrayList
 import java.util.HashMap
 import java.util.HashSet
 import java.util.concurrent.ConcurrentHashMap
+import org.example.vicky.skill.Skill
+import org.example.vicky.skill.SkillManager
 
 // ─── 元数据结构 ────────────────────────────────────────────
 
@@ -318,19 +320,8 @@ object ClassAutoRegistry {
 
     private fun generateSkills() {
         try {
-            val skillManagerClass = try {
-                Class.forName("org.example.vicky.skill.SkillManager")
-            } catch (_: ClassNotFoundException) {
-                println("[Vicky][script] SkillManager 未找到，跳过技能生成")
-                return
-            }
-
-            val registerGroupMethod = skillManagerClass.getMethod("registerGroup", String::class.java, String::class.java)
-            val registerMethod = skillManagerClass.getMethod("register", Class.forName("org.example.vicky.skill.Skill"))
-            val instance = skillManagerClass.getField("INSTANCE").get(null)
-
             // 注册分组
-            registerGroupMethod.invoke(instance, "runtime-api", "Vicky runtime classes and objects auto-injected into script scope.")
+            SkillManager.registerGroup("runtime-api", "Vicky runtime classes and objects auto-injected into script scope.")
 
             // 确定技能写入目录
             val skillsDir = resolveSkillsDir() ?: run {
@@ -355,10 +346,6 @@ object ClassAutoRegistry {
             }
 
             // 为每个有元数据的类生成技能
-            val skillConstructor = Class.forName("org.example.vicky.skill.Skill").constructors.first {
-                it.parameterCount == 5 // name, description, body, group, enabled
-            }
-
             for ((name, meta) in metaMap) {
                 val body = buildSkillBody(meta)
                 val description = if (meta.isObject) {
@@ -367,9 +354,7 @@ object ClassAutoRegistry {
                     "Kotlin class: ${meta.fullClassName}."
                 }
 
-                // 注册到 SkillManager
-                val skill = skillConstructor.newInstance(name, description, body, "runtime-api", true)
-                registerMethod.invoke(instance, skill)
+                SkillManager.register(Skill(name, description, body, group = "runtime-api"))
 
                 // 写入文件
                 val skillDir = File(groupDir, name)
@@ -388,9 +373,10 @@ object ClassAutoRegistry {
                 }
             }
 
-            println("[Vicky][script] 已生成 ${metaMap.size} 个 runtime-api 技能")
+            println("[Vicky][script] 已注册 ${metaMap.size} 个 runtime-api 技能到 SkillManager")
         } catch (e: Exception) {
             println("[Vicky][script] 技能生成失败: ${e.message}")
+            e.printStackTrace()
         }
     }
 
