@@ -6,6 +6,7 @@ import org.mozilla.javascript.ScriptableObject
 import org.mozilla.javascript.BaseFunction
 import org.mozilla.javascript.Undefined
 import java.io.File
+import java.lang.reflect.Modifier
 import java.net.URLDecoder
 import java.nio.file.Files
 import java.nio.file.Path
@@ -23,14 +24,41 @@ import java.util.HashMap
 import java.util.HashSet
 import java.util.concurrent.ConcurrentHashMap
 
+// ─── 元数据结构 ────────────────────────────────────────────
+
+data class ClassMeta(
+    val simpleName: String,
+    val fullClassName: String,
+    val isObject: Boolean,
+    val isEnum: Boolean,
+    val fields: List<FieldInfo>,
+    val constructors: List<ConstructorInfo>,
+    val methods: List<MethodInfo>,
+)
+
+data class FieldInfo(val name: String, val type: String, val isStatic: Boolean)
+
+data class ConstructorInfo(val params: List<ParamInfo>)
+
+data class MethodInfo(val name: String, val returnType: String, val params: List<ParamInfo>)
+
+data class ParamInfo(val name: String, val type: String)
+
+// ─── 注册表 ────────────────────────────────────────────────
+
 /**
  * 反射扫描 classpath，自动注入类到 Rhino 全局作用域。
  * 脚本中可直接使用类名，无需 import。
+ *
+ * Kotlin object 单例自动注入 INSTANCE 实例。
+ * 扫描时收集类元数据，可生成 API 技能文档。
  */
 object ClassAutoRegistry {
 
     private val classMap = ConcurrentHashMap<String, Class<*>>()
+    private val metaMap = ConcurrentHashMap<String, ClassMeta>()
     @Volatile private var initialized = false
+    @Volatile private var skillsGenerated = false
 
     private val predefinedClasses: List<Class<*>> = listOf(
         File::class.java,
@@ -69,6 +97,8 @@ object ClassAutoRegistry {
 
     /**
      * 向 Rhino scope 注入所有已注册的类。
+     * Kotlin object 单例注入 INSTANCE 实例，普通类注入构造函数代理。
+     * 末尾自动生成 runtime-api 技能。
      */
     fun injectAll(ctx: Context, scope: ScriptableObject) {
         init()
@@ -91,29 +121,55 @@ object ClassAutoRegistry {
         }
         ScriptableObject.putProperty(javaObj, "type", typeFn)
         ScriptableObject.putProperty(scope, "Java", javaObj)
+
+        // 自动生成 runtime-api 技能
+        if (!skillsGenerated) {
+            skillsGenerated = true
+            generateSkills()
+        }
     }
 
     fun register(cls: Class<*>) {
         classMap.putIfAbsent(cls.simpleName, cls)
+        collectMeta(cls)
     }
 
     fun register(name: String, cls: Class<*>) {
         classMap[name] = cls
+        collectMeta(cls)
     }
 
     fun registeredNames(): Set<String> = classMap.keys.toSet()
 
+    /** 获取已收集的类元数据。 */
+    fun classMetadata(): Map<String, ClassMeta> = metaMap.toMap()
+
+    // ─── 注入 ────────────────────────────────────────────────
+
     private fun injectClass(ctx: Context, scope: ScriptableObject, name: String, cls: Class<*>) {
         try {
-            val proxy = createClassProxy(ctx, scope, cls)
-            // 枚举类型：将枚举常量注入为属性，如 StandardCopyOption.REPLACE_EXISTING
-            if (cls.isEnum) {
-                for (constant in cls.enumConstants) {
-                    val enumVal = constant as Enum<*>
-                    ScriptableObject.putProperty(proxy, enumVal.name, Context.javaToJS(constant, scope))
-                }
+            // 检测 Kotlin object 单例（INSTANCE 字段）
+            val instanceField = cls.declaredFields.firstOrNull {
+                it.name == "INSTANCE" &&
+                    it.type == cls &&
+                    Modifier.isStatic(it.modifiers) &&
+                    Modifier.isPublic(it.modifiers)
             }
-            ScriptableObject.putProperty(scope, name, proxy)
+            if (instanceField != null) {
+                val instance = instanceField.get(null)
+                val wrapped = Context.javaToJS(instance, scope)
+                ScriptableObject.putProperty(scope, name, wrapped)
+            } else {
+                // 普通类：构造函数代理
+                val proxy = createClassProxy(ctx, scope, cls)
+                if (cls.isEnum) {
+                    for (constant in cls.enumConstants) {
+                        val enumVal = constant as Enum<*>
+                        ScriptableObject.putProperty(proxy, enumVal.name, Context.javaToJS(constant, scope))
+                    }
+                }
+                ScriptableObject.putProperty(scope, name, proxy)
+            }
         } catch (e: Exception) {
             println("[Vicky][script] 注入类 $name 失败: ${e.message}")
         }
@@ -132,7 +188,6 @@ object ClassAutoRegistry {
             override fun construct(cx: Context, scope: Scriptable, args: Array<out Any?>): Scriptable {
                 val instance = tryCreateInstance(cx, scope as ScriptableObject, cls, args)
                     ?: throw ScriptException("Cannot create ${cls.simpleName}")
-                // Rhino 原生包装：保留 Java 对象的方法访问能力
                 val wrapped = Context.javaToJS(instance, scope as ScriptableObject)
                 return wrapped as? Scriptable
                     ?: throw ScriptException("Cannot wrap ${cls.simpleName} as JS object")
@@ -141,7 +196,6 @@ object ClassAutoRegistry {
     }
 
     private fun tryCreateInstance(cx: Context, scope: ScriptableObject, cls: Class<*>, args: Array<out Any?>): Any? {
-        // 先尝试匹配参数数量的构造函数
         for (ctor in cls.constructors) {
             if (ctor.parameterCount == args.size) {
                 try {
@@ -150,7 +204,6 @@ object ClassAutoRegistry {
                 } catch (_: Exception) { continue }
             }
         }
-        // 无参构造
         if (args.isEmpty()) {
             try {
                 return cls.getDeclaredConstructor().newInstance()
@@ -182,24 +235,7 @@ object ClassAutoRegistry {
         }
     }
 
-    /**
-     * 将 Java 对象包装为 Rhino JS 对象，使其属性可在 JS 中访问。
-     */
-    private fun wrapAsJsObject(cx: Context, scope: ScriptableObject, obj: Any?, cls: Class<*>): Scriptable {
-        val jsObj = cx.newObject(scope)
-        if (obj == null) return jsObj
-        for (field in cls.declaredFields) {
-            if (java.lang.reflect.Modifier.isStatic(field.modifiers)) continue
-            try {
-                field.isAccessible = true
-                val value = field.get(obj)
-                ScriptableObject.putProperty(jsObj, field.name, Context.javaToJS(value, scope))
-            } catch (_: Exception) {
-                // 跳过无法访问的字段（Java module 限制）
-            }
-        }
-        return jsObj
-    }
+    // ─── 扫描 ────────────────────────────────────────────────
 
     private fun scanPackage(packageName: String) {
         val classLoader = ClassAutoRegistry::class.java.classLoader ?: return
@@ -230,10 +266,198 @@ object ClassAutoRegistry {
                         val existing = classMap[cls.simpleName]
                         if (existing == null || cls.packageName.startsWith("org.example.vicky")) {
                             classMap[cls.simpleName] = cls
+                            // 收集元数据
+                            collectMeta(cls)
                         }
                     }
                 } catch (_: Exception) {}
             }
         }
+    }
+
+    // ─── 元数据收集 ──────────────────────────────────────────
+
+    private fun collectMeta(cls: Class<*>) {
+        try {
+            val isObj = cls.declaredFields.any {
+                it.name == "INSTANCE" && it.type == cls && Modifier.isStatic(it.modifiers)
+            }
+
+            val fields = cls.declaredFields
+                .filter { !it.isSynthetic }
+                .map { FieldInfo(it.name, it.type.simpleName, Modifier.isStatic(it.modifiers)) }
+
+            val constructors = cls.constructors
+                .map { ctor ->
+                    ConstructorInfo(ctor.parameters.mapIndexed { i, p -> ParamInfo(p.name ?: "arg$i", p.type.simpleName) })
+                }
+
+            val methods = cls.declaredMethods
+                .filter { Modifier.isPublic(it.modifiers) && !it.isSynthetic }
+                .map { m ->
+                    MethodInfo(
+                        m.name,
+                        m.returnType.simpleName,
+                        m.parameters.mapIndexed { i, p -> ParamInfo(p.name ?: "arg$i", p.type.simpleName) }
+                    )
+                }
+
+            metaMap[cls.simpleName] = ClassMeta(
+                simpleName = cls.simpleName,
+                fullClassName = cls.name,
+                isObject = isObj,
+                isEnum = cls.isEnum,
+                fields = fields,
+                constructors = constructors,
+                methods = methods,
+            )
+        } catch (_: Exception) {}
+    }
+
+    // ─── 技能生成 ────────────────────────────────────────────
+
+    private fun generateSkills() {
+        try {
+            val skillManagerClass = try {
+                Class.forName("org.example.vicky.skill.SkillManager")
+            } catch (_: ClassNotFoundException) {
+                println("[Vicky][script] SkillManager 未找到，跳过技能生成")
+                return
+            }
+
+            val registerGroupMethod = skillManagerClass.getMethod("registerGroup", String::class.java, String::class.java)
+            val registerMethod = skillManagerClass.getMethod("register", Class.forName("org.example.vicky.skill.Skill"))
+            val instance = skillManagerClass.getField("INSTANCE").get(null)
+
+            // 注册分组
+            registerGroupMethod.invoke(instance, "runtime-api", "Vicky runtime classes and objects auto-injected into script scope.")
+
+            // 确定技能写入目录
+            val skillsDir = resolveSkillsDir() ?: run {
+                println("[Vicky][script] 无法确定 skills 目录，跳过技能文件写入")
+                return
+            }
+            val groupDir = File(skillsDir, "runtime-api")
+
+            // 写入 group.md
+            val groupMdFile = File(groupDir, "group.md")
+            if (!groupMdFile.exists()) {
+                groupDir.mkdirs()
+                groupMdFile.writeText(buildString {
+                    appendLine("---")
+                    appendLine("name: runtime-api")
+                    appendLine("description: Vicky runtime classes and objects auto-injected into script scope.")
+                    appendLine("---")
+                    appendLine()
+                    appendLine("此分组包含 Vicky 运行时所有自动注入的类和对象的 API 文档。")
+                    appendLine("每个类/object 对应一个技能，包含字段、构造方法、公开方法的完整签名。")
+                }, Charsets.UTF_8)
+            }
+
+            // 为每个有元数据的类生成技能
+            val skillConstructor = Class.forName("org.example.vicky.skill.Skill").constructors.first {
+                it.parameterCount == 5 // name, description, body, group, enabled
+            }
+
+            for ((name, meta) in metaMap) {
+                val body = buildSkillBody(meta)
+                val description = if (meta.isObject) {
+                    "Kotlin object singleton: ${meta.fullClassName}. Auto-injected into script scope."
+                } else {
+                    "Kotlin class: ${meta.fullClassName}."
+                }
+
+                // 注册到 SkillManager
+                val skill = skillConstructor.newInstance(name, description, body, "runtime-api", true)
+                registerMethod.invoke(instance, skill)
+
+                // 写入文件
+                val skillDir = File(groupDir, name)
+                val skillFile = File(skillDir, "SKILL.md")
+                if (!skillFile.exists()) {
+                    skillDir.mkdirs()
+                    skillFile.writeText(buildString {
+                        appendLine("---")
+                        appendLine("name: $name")
+                        appendLine("description: $description")
+                        appendLine("group: runtime-api")
+                        appendLine("---")
+                        appendLine()
+                        append(body)
+                    }, Charsets.UTF_8)
+                }
+            }
+
+            println("[Vicky][script] 已生成 ${metaMap.size} 个 runtime-api 技能")
+        } catch (e: Exception) {
+            println("[Vicky][script] 技能生成失败: ${e.message}")
+        }
+    }
+
+    private fun buildSkillBody(meta: ClassMeta): String = buildString {
+        appendLine("# ${meta.simpleName}")
+        appendLine()
+        if (meta.isObject) {
+            appendLine("Kotlin object (singleton). In scripts, use directly as `${meta.simpleName}`.")
+        } else {
+            appendLine("Kotlin class. Create instances with `new ${meta.simpleName}(...)` or `${meta.simpleName}(...)`.")
+        }
+        appendLine()
+        appendLine("Full class: `${meta.fullClassName}`")
+
+        if (meta.fields.isNotEmpty()) {
+            appendLine()
+            appendLine("## Fields")
+            for (f in meta.fields) {
+                val static = if (f.isStatic) " (static)" else ""
+                appendLine("- `${f.name}`: ${f.type}$static")
+            }
+        }
+
+        if (meta.constructors.isNotEmpty()) {
+            appendLine()
+            appendLine("## Constructors")
+            for ((i, ctor) in meta.constructors.withIndex()) {
+                val params = ctor.params.joinToString(", ") { "${it.name}: ${it.type}" }
+                appendLine("- `${meta.simpleName}($params)`")
+            }
+        }
+
+        if (meta.methods.isNotEmpty()) {
+            appendLine()
+            appendLine("## Methods")
+            for (m in meta.methods) {
+                val params = m.params.joinToString(", ") { "${it.name}: ${it.type}" }
+                appendLine("- `${m.name}($params): ${m.returnType}`")
+            }
+        }
+
+        if (meta.isObject) {
+            appendLine()
+            appendLine("## Usage in TypeScript")
+            appendLine("```typescript")
+            appendLine("// Direct access — no constructor needed")
+            appendLine("var instance = ${meta.simpleName};")
+            if (meta.methods.isNotEmpty()) {
+                val firstMethod = meta.methods.first()
+                val sampleArgs = firstMethod.params.joinToString(", ") { "..." }
+                appendLine("var result = ${meta.simpleName}.${firstMethod.name}($sampleArgs);")
+            }
+            appendLine("```")
+        }
+    }
+
+    private fun resolveSkillsDir(): File? {
+        // 尝试通过 ConfigManager 获取 config/skills 目录
+        try {
+            val configMgrClass = Class.forName("org.example.vicky.config.ConfigManager")
+            val getConfigDirMethod = configMgrClass.getMethod("getConfigDir")
+            val configDir = getConfigDirMethod.invoke(null) as? File
+            if (configDir != null) {
+                return File(configDir, "skills")
+            }
+        } catch (_: Exception) {}
+        // 回退：当前工作目录
+        return File(System.getProperty("user.dir"), "config/skills")
     }
 }

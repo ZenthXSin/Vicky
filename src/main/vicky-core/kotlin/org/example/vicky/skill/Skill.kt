@@ -10,5 +10,6 @@ data class Skill(
     val name: String,
     val description: String,
     val body: String,
+    val group: String = "",
     val enabled: Boolean = true,
 )

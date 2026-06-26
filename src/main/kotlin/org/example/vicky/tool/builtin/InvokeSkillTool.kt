@@ -34,12 +34,33 @@ class InvokeSkillTool : Tool() {
     override suspend fun execute(userId: String, args: JsonObject): ToolResult {
         val n = args["name"]?.jsonPrimitive?.content?.trim()
             ?: return ToolResult(toAgent = "error: missing required parameter 'name'")
+
+        // 1. 先查普通技能
         val skill = SkillManager.find(n)
-            ?: return ToolResult(toAgent = "error: skill '$n' not found")
-        if (!skill.enabled) {
-            return ToolResult(toAgent = "error: skill '$n' is currently disabled")
+        if (skill != null) {
+            if (!skill.enabled) {
+                return ToolResult(toAgent = "error: skill '$n' is currently disabled")
+            }
+            val header = "# Skill: ${skill.name}\n> ${skill.description}\n\n"
+            return ToolResult(toAgent = header + skill.body)
         }
-        val header = "# Skill: ${skill.name}\n> ${skill.description}\n\n"
-        return ToolResult(toAgent = header + skill.body)
+
+        // 2. 再查分组
+        val groupDesc = SkillManager.groupDescription(n)
+        if (groupDesc != null) {
+            val groupSkills = SkillManager.byGroup(n)
+            if (groupSkills.isEmpty()) {
+                return ToolResult(toAgent = "Group '$n' exists but contains no enabled skills.")
+            }
+            val sb = StringBuilder("# Group: $n")
+            if (groupDesc.isNotEmpty()) sb.append("\n> $groupDesc")
+            sb.append("\n\nSkills in this group (${groupSkills.size}):\n")
+            for (s in groupSkills) {
+                sb.append("\n## ${s.name}\n> ${s.description}\n\n${s.body}\n")
+            }
+            return ToolResult(toAgent = sb.toString().trimEnd())
+        }
+
+        return ToolResult(toAgent = "error: skill or group '$n' not found")
     }
 }

@@ -35,9 +35,27 @@ class ContextBuilder(
         val skills = SkillManager.all()
         if (skills.isNotEmpty()) {
             append("\n\n# Available Skills\n")
-            for (s in skills) {
+
+            // 无分组的技能：直接展示
+            val ungrouped = skills.filter { it.group.isEmpty() }
+            for (s in ungrouped) {
                 append("- ").append(s.name).append(": ").append(s.description).append('\n')
             }
+
+            // 有分组的技能：折叠展示，只显示分组名+描述
+            val groups = SkillManager.groups()
+            if (groups.isNotEmpty()) {
+                for ((groupName, groupDesc) in groups) {
+                    val groupSkills = SkillManager.byGroup(groupName)
+                    if (groupSkills.isNotEmpty()) {
+                        append("\n## ").append(groupName)
+                        if (groupDesc.isNotEmpty()) append(" — ").append(groupDesc)
+                        append('\n')
+                        append("Contains ${groupSkills.size} skills. Call `invoke_skill(name=\"${groupName}\")` to see all skills in this group.\n")
+                    }
+                }
+            }
+
             append("\nWhen a user request matches a skill, call `invoke_skill(name=<skill-name>)` first to load its full instructions, then follow them.")
         }
     }

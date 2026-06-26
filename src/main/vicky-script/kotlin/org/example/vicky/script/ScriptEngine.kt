@@ -76,7 +76,9 @@ class ScriptEngine {
                         name: typeof name !== 'undefined' ? name : null,
                         description: typeof description !== 'undefined' ? description : null,
                         parameters: typeof parameters !== 'undefined' ? parameters : null,
-                        execute: typeof execute !== 'undefined' ? execute : null
+                        execute: typeof execute !== 'undefined' ? execute : null,
+                        onLoad: typeof onLoad !== 'undefined' ? onLoad : null,
+                        onUnload: typeof onUnload !== 'undefined' ? onUnload : null
                     };
                 })();
                 """.trimIndent(),
@@ -97,8 +99,14 @@ class ScriptEngine {
             } else """{"type":"object","properties":{}}"""
 
             val executeFn = ScriptableObject.getProperty(result, "execute")
-            if (executeFn == null || executeFn == Undefined.instance) {
-                throw ScriptException("Script must export 'execute' function: $fileName")
+                .takeIf { it != null && it != Undefined.instance }
+            val onLoadFn = ScriptableObject.getProperty(result, "onLoad")
+                .takeIf { it != null && it != Undefined.instance }
+            val onUnloadFn = ScriptableObject.getProperty(result, "onUnload")
+                .takeIf { it != null && it != Undefined.instance }
+
+            if (executeFn == null && onLoadFn == null) {
+                throw ScriptException("Script must export at least 'execute' or 'onLoad': $fileName")
             }
 
             return ScriptExports(
@@ -106,6 +114,8 @@ class ScriptEngine {
                 description = description,
                 parameters = parameters,
                 executeFn = executeFn,
+                onLoadFn = onLoadFn,
+                onUnloadFn = onUnloadFn,
                 fileName = fileName,
                 rhinoScope = scope,
                 rhinoContext = ctx,

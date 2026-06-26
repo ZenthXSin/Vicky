@@ -13,6 +13,7 @@ import java.util.concurrent.ConcurrentHashMap
  */
 object SkillManager {
     private val byName = ConcurrentHashMap<String, Skill>()
+    private val groupMeta = ConcurrentHashMap<String, String>() // groupName -> description
 
     /** 注册一个 skill。同名覆盖。 */
     fun register(skill: Skill) {
@@ -50,8 +51,26 @@ object SkillManager {
     fun getStates(): Map<String, Boolean> =
         byName.values.associate { it.name to it.enabled }
 
-    /** 清空所有 skill。 */
+    // ─── 分组 ─────────────────────────────────────────────────
+
+    /** 注册分组元数据。 */
+    fun registerGroup(name: String, description: String) {
+        groupMeta[name] = description
+    }
+
+    /** 获取分组描述。 */
+    fun groupDescription(name: String): String? = groupMeta[name]
+
+    /** 所有分组名 -> 描述。 */
+    fun groups(): Map<String, String> = groupMeta.toMap()
+
+    /** 指定分组下的所有技能。 */
+    fun byGroup(group: String): List<Skill> =
+        byName.values.filter { it.group == group && it.enabled }.sortedBy { it.name }
+
+    /** 清空所有 skill 和分组。 */
     fun clear() {
         byName.clear()
+        groupMeta.clear()
     }
 }

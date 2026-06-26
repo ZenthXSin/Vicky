@@ -124,6 +124,9 @@ object ConfigManager {
         val configDir = getConfigDir()
         val configFile = File(configDir, "config.json")
 
+        // 每次启动都同步内置资源（scripts/skills）
+        syncBuiltinResources(configDir)
+
         if (!configFile.exists()) {
             val (config, md) = generateDefaults(configDir)
             return LoadResult(config, md, firstRun = true)
@@ -211,6 +214,16 @@ object ConfigManager {
         )
     }
 
+    private fun syncBuiltinResources(configDir: File) {
+        val scriptsDir = File(configDir, "scripts")
+        scriptsDir.mkdirs()
+        syncResource("scripts/hello.ts", File(scriptsDir, "hello.ts"))
+
+        val skillsDir = File(configDir, "skills")
+        skillsDir.mkdirs()
+        syncResource("skills/script-writing/SKILL.md", File(skillsDir, "script-writing/SKILL.md"))
+    }
+
     private fun generateDefaults(configDir: File): Pair<ConfigData, String> {
         configDir.mkdirs()
 
@@ -218,15 +231,6 @@ object ConfigManager {
         val agentMdFileName = deriveFileName(agentMdContent)
 
         File(configDir, agentMdFileName).writeText(agentMdContent, Charsets.UTF_8)
-
-        // 创建 scripts 和 skills 目录，复制默认资源
-        val scriptsDir = File(configDir, "scripts")
-        scriptsDir.mkdirs()
-        copyResourceIfAbsent("scripts/hello.ts", File(scriptsDir, "hello.ts"))
-
-        val skillsDir = File(configDir, "skills")
-        skillsDir.mkdirs()
-        copyResourceIfAbsent("skills/script-writing/SKILL.md", File(skillsDir, "script-writing/SKILL.md"))
 
         val configData = ConfigData(
             model = "deepseek-v4-flash",
@@ -256,13 +260,12 @@ object ConfigManager {
         return Pair(configData, agentMdContent)
     }
 
-    private fun copyResourceIfAbsent(resourcePath: String, target: File) {
-        if (target.exists()) return
+    private fun syncResource(resourcePath: String, target: File) {
         target.parentFile?.mkdirs()
         val stream = ConfigManager::class.java.classLoader?.getResourceAsStream(resourcePath) ?: return
-        stream.use { input ->
-            target.outputStream().use { output -> input.copyTo(output) }
-        }
+        val resourceBytes = stream.use { it.readBytes() }
+        if (target.exists() && target.readBytes().contentEquals(resourceBytes)) return
+        target.writeBytes(resourceBytes)
     }
 
     fun toAgentConfig(configData: ConfigData, agentMdContent: String): AgentConfig {

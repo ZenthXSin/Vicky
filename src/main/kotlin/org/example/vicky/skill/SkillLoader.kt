@@ -41,24 +41,39 @@ object SkillLoader {
     fun rootDir(): File? = rootDir
 
     private fun scan(root: File, persistedStates: Map<String, Boolean>) {
-        val children = root.listFiles { f -> f.isDirectory } ?: return
-        for (dir in children) {
-            val skillFile = File(dir, "SKILL.md")
-            if (!skillFile.isFile) continue
-            val text = runCatching { skillFile.readText(Charsets.UTF_8) }.getOrElse {
-                println("[Vicky][skill] 读取失败: ${skillFile.absolutePath}: ${it.message}")
-                continue
+        scanDir(root, persistedStates, group = "")
+    }
+
+    private fun scanDir(dir: File, persistedStates: Map<String, Boolean>, group: String) {
+        val children = dir.listFiles { f -> f.isDirectory } ?: return
+        for (child in children) {
+            val groupFile = File(child, "group.md")
+            val skillFile = File(child, "SKILL.md")
+
+            if (groupFile.isFile) {
+                // 分组目录：注册分组，然后递归扫描子目录
+                val parsed = SkillFrontmatterParser.parse(groupFile.readText(Charsets.UTF_8))
+                val groupName = parsed.meta["name"]?.trim() ?: child.name
+                val groupDesc = parsed.meta["description"]?.trim() ?: ""
+                SkillManager.registerGroup(groupName, groupDesc)
+                scanDir(child, persistedStates, group = groupName)
+            } else if (skillFile.isFile) {
+                // 技能目录
+                val text = runCatching { skillFile.readText(Charsets.UTF_8) }.getOrElse {
+                    println("[Vicky][skill] 读取失败: ${skillFile.absolutePath}: ${it.message}")
+                    continue
+                }
+                val parsed = SkillFrontmatterParser.parse(text)
+                val name = parsed.meta["name"]?.trim()
+                val description = parsed.meta["description"]?.trim()
+                if (name.isNullOrBlank() || description.isNullOrBlank()) {
+                    println("[Vicky][skill] 跳过 ${child.name}: SKILL.md 缺 name/description")
+                    continue
+                }
+                val enabled = persistedStates[name] ?: true
+                dirByName[name] = child
+                SkillManager.register(Skill(name, description, parsed.body, group = group, enabled = enabled))
             }
-            val parsed = SkillFrontmatterParser.parse(text)
-            val name = parsed.meta["name"]?.trim()
-            val description = parsed.meta["description"]?.trim()
-            if (name.isNullOrBlank() || description.isNullOrBlank()) {
-                println("[Vicky][skill] 跳过 ${dir.name}: SKILL.md 缺 name/description")
-                continue
-            }
-            val enabled = persistedStates[name] ?: true
-            dirByName[name] = dir
-            SkillManager.register(Skill(name, description, parsed.body, enabled))
         }
         val activeCount = SkillManager.all().size
         val totalCount = SkillManager.allIncludingDisabled().size

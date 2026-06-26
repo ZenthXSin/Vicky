@@ -46,6 +46,10 @@ class ManageSkillsTool(
                 put("type", "string")
                 put("description", "Skill name. Required for enable / disable / delete.")
             }
+            putJsonObject("group") {
+                put("type", "string")
+                put("description", "Filter by group name. Optional for list action.")
+            }
         }
         putJsonArray("required") { add(JsonPrimitive("action")) }
     }
@@ -54,7 +58,7 @@ class ManageSkillsTool(
         val action = args["action"]?.jsonPrimitive?.content
             ?: return ToolResult(toAgent = "error: missing required parameter 'action'")
         return when (action) {
-            "list" -> list()
+            "list" -> list(args)
             "enable" -> toggle(args, enable = true)
             "disable" -> toggle(args, enable = false)
             "delete" -> delete(args)
@@ -63,22 +67,61 @@ class ManageSkillsTool(
         }
     }
 
-    private fun list(): ToolResult {
+    private fun list(args: JsonObject): ToolResult {
+        val filterGroup = args["group"]?.jsonPrimitive?.content?.trim()
         val all = SkillManager.allIncludingDisabled()
         if (all.isEmpty()) {
             val root = SkillLoader.rootDir()?.absolutePath ?: "(未初始化)"
             return ToolResult(toAgent = "no skills found. skills dir: $root")
         }
+
         val sb = StringBuilder()
-        val enabled = all.filter { it.enabled }
-        val disabled = all.filter { !it.enabled }
-        sb.appendLine("=== Enabled skills (${enabled.size}) ===")
-        for (s in enabled) sb.appendLine("[enabled]  ${s.name} — ${s.description}")
-        if (disabled.isNotEmpty()) {
-            sb.appendLine()
-            sb.appendLine("=== Disabled skills (${disabled.size}) ===")
-            for (s in disabled) sb.appendLine("[disabled] ${s.name} — ${s.description}")
+
+        // 如果按分组过滤
+        if (filterGroup != null) {
+            val groupSkills = all.filter { it.group == filterGroup }
+            if (groupSkills.isEmpty()) {
+                return ToolResult(toAgent = "no skills found in group '$filterGroup'")
+            }
+            val groupDesc = SkillManager.groupDescription(filterGroup) ?: ""
+            sb.appendLine("=== Group: $filterGroup${if (groupDesc.isNotEmpty()) " — $groupDesc" else ""} (${groupSkills.size}) ===")
+            for (s in groupSkills) {
+                val status = if (s.enabled) "enabled" else "disabled"
+                sb.appendLine("[$status] ${s.name} — ${s.description}")
+            }
+            return ToolResult(toAgent = sb.toString().trimEnd())
         }
+
+        // 无分组的技能
+        val ungrouped = all.filter { it.group.isEmpty() }
+        val enabledUngrouped = ungrouped.filter { it.enabled }
+        val disabledUngrouped = ungrouped.filter { !it.enabled }
+
+        if (enabledUngrouped.isNotEmpty()) {
+            sb.appendLine("=== Enabled skills (${enabledUngrouped.size}) ===")
+            for (s in enabledUngrouped) sb.appendLine("[enabled]  ${s.name} — ${s.description}")
+        }
+        if (disabledUngrouped.isNotEmpty()) {
+            sb.appendLine()
+            sb.appendLine("=== Disabled skills (${disabledUngrouped.size}) ===")
+            for (s in disabledUngrouped) sb.appendLine("[disabled] ${s.name} — ${s.description}")
+        }
+
+        // 分组技能概览
+        val groups = SkillManager.groups()
+        if (groups.isNotEmpty()) {
+            sb.appendLine()
+            for ((groupName, groupDesc) in groups) {
+                val groupSkills = all.filter { it.group == groupName }
+                val enabledCount = groupSkills.count { it.enabled }
+                sb.appendLine("=== Group: $groupName${if (groupDesc.isNotEmpty()) " — $groupDesc" else ""} ($enabledCount/${groupSkills.size} enabled) ===")
+                for (s in groupSkills) {
+                    val status = if (s.enabled) "enabled" else "disabled"
+                    sb.appendLine("  [$status] ${s.name} — ${s.description}")
+                }
+            }
+        }
+
         return ToolResult(toAgent = sb.toString().trimEnd())
     }
 
