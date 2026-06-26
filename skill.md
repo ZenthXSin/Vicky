@@ -2,47 +2,45 @@
 
 ## 概述
 
-Vicky 的脚本系统基于 **TypeScript**（通过 Rhino JS 引擎 + 内置 tsc 编译器）。每个 `.ts` 脚本可以：
+Vicky 的脚本系统基于 **TypeScript**（通过 Rhino JS 引擎 + 内置 tsc 编译器）。脚本文件存放在 `config/scripts/` 目录下，**启动时自动加载**。
 
-1. **定义工具（Tool）** — 被 AI Agent 调用
-2. **作为插件** — 通过 `onLoad`/`onUnload` 钩子在加载/卸载时执行自定义逻辑
-3. **访问运行时** — 所有 Kotlin object 单例自动注入，可直接操作 Agent、Bot、配置等
+每个 `.ts` 脚本可以：
 
-脚本文件存放在 `config/scripts/` 目录下。
+1. **直接执行** — 顶层代码在加载时立即运行，无需导出任何东西
+2. **定义工具（Tool）** — 导出 `execute` 函数，被 AI Agent 调用
+3. **作为插件** — 导出 `onLoad`/`onUnload` 钩子，在加载/卸载时执行
+4. **访问运行时** — 所有 Kotlin object 单例自动注入，可直接操作 Agent、Bot、配置等
+5. **真协程** — `coroutine.launch()` 启动后台异步任务，脚本卸载时自动取消
 
 ---
 
 ## 脚本结构
 
-每个脚本**必须导出** `name` 和至少一个钩子/函数：
+**所有字段都是可选的**，脚本可以只跑顶层代码。
 
-- `name` — 工具名称（必须）
-- `description` — 工具描述
+- `name` — 工具名称（省略则用文件名，如 `hello.ts` → `hello`）
+- `description` — 工具描述（省略则为空）
 - `parameters` — JSON Schema 参数定义
-- `execute(ctx, args)` — 工具执行函数
-- `onLoad()` — 脚本加载时调用（可选）
-- `onUnload()` — 脚本卸载时调用（可选）
-
-`execute` 和 `onLoad` 至少要有一个。纯插件模式可以只有 `onLoad` 而没有 `execute`。
+- `execute(ctx, args)` — 工具执行函数（定义后注册为工具）
+- `onLoad()` — 脚本加载时调用
+- `onUnload()` — 脚本卸载时调用
 
 ```typescript
-// 1. name — 工具名称（必须，字符串）
+// 最简：什么都不导出，顶层代码直接跑
+var Timer = Java.type("java.util.Timer");
+var timer = new Timer("my-task", true);
+// ...
+
+// 完整：定义工具
 var name: string = "my_tool";
-
-// 2. description — 工具描述（必须，字符串，告诉 AI 何时使用此工具）
 var description: string = "做什么用的，一句话说清楚";
-
-// 3. parameters — JSON Schema 格式的参数定义（必须，对象）
 var parameters = {
     type: "object",
     properties: {
-        param1: { type: "string", description: "参数说明" },
-        param2: { type: "integer", description: "数字参数" }
-    },
-    required: ["param1"]  // 可选，列出必填参数
+        param1: { type: "string", description: "参数说明" }
+    }
 };
 
-// 4. execute — 执行函数（必须，async function）
 async function execute(ctx: any, args: any): Promise<any> {
     // ── ctx 只读属性 ──
     // ctx.userId         — 调用者 ID
@@ -51,12 +49,17 @@ async function execute(ctx: any, args: any): Promise<any> {
 
     // ── ctx 主动发消息 ──
     // ctx.sendGroupMessage(groupId, text) — 发送群消息
-    // ctx.sendMessage(targetId, text)     — 发送私聊消息（好友/陌生人）
+    // ctx.sendMessage(targetId, text)     — 发送私聊消息
 
     // ── ctx 定时器 ──
-    // var timer = ctx.setTimer(intervalMs, callback) — 创建定时器
-    // timer.cancel() — 取消定时器
-    // timer.interval — 间隔毫秒数
+    // var timer = ctx.setTimer(intervalMs, callback)
+    // timer.cancel()
+
+    // ── 协程 ──
+    // coroutine.launch(function(co) {
+    //     co.delay(5000);
+    //     ctx.sendGroupMessage("123", "5秒后发送");
+    // });
 
     return {
         toAgent: "返回给 AI 的内容（必填）",
@@ -70,7 +73,7 @@ async function execute(ctx: any, args: any): Promise<any> {
 
 ## 返回值说明
 
-`execute` 函数必须返回一个对象，包含以下字段：
+`execute` 函数（如果定义了）应返回一个对象，包含以下字段：
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -739,7 +742,7 @@ async function execute(ctx: any, args: any): Promise<any> {
 
 ## manage_scripts 工具用法
 
-通过 `manage_scripts` 工具管理脚本的生命周期：
+**启动时自动加载** `config/scripts/` 目录下所有 `.ts` 文件。也可通过 `manage_scripts` 工具手动管理：
 
 | action | 参数 | 说明 |
 |--------|------|------|

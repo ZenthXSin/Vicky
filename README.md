@@ -199,87 +199,64 @@ description: Vicky 运行时类和对象的 API 文档
 
 ### 动态脚本系统（vicky-script）
 
-vicky-script 提供 TypeScript 脚本的编译、执行和 Tool 桥接能力。模块本身不扫描目录、不监控文件，由调用方决定何时加载。
-
-**核心 API：**
-- `ScriptManager.loadScript(file)` — 编译并执行 TS 文件，返回 `ScriptToolBridge`（即 `Tool`）
-- `ScriptManager.loadScriptFromSource(tsSource, fileName)` — 从源码字符串加载
-- `ScriptManager.loadAndRegister(file, registry)` — 加载并注册到 ToolRegistry
-- `ScriptManager.unloadScript(fileName, registry)` — 卸载并从 registry 移除
-- `ScriptManager.reloadScript(file, registry)` — 重载脚本
+TypeScript 脚本的编译、执行和 Tool 桥接。`config/scripts/` 下的 `.ts` 文件**启动时自动加载**。
 
 **特性：**
-- **TypeScript 编译**：内嵌 TypeScript 4.9.5 编译器，自动将 `.ts` 编译为 `.js`
-- **Kotlin object 自动注入**：classpath 上所有 Kotlin object 单例（`AgentManager`、`ConfigManager`、`SkillManager`、`MiraiToolImpl` 等）自动注入 INSTANCE 实例，脚本中直接使用
-- **普通类自动注入**：其他类注入为构造函数代理，通过 `new ClassName(...)` 创建实例
-- **全量 API 访问**：脚本可通过注入的 object 单例访问所有运行时实例（Bot、Agent 等），能力等同原生 Kotlin
-- **生命周期钩子**：脚本可导出 `onLoad()` / `onUnload()` 函数，在加载/卸载时自动调用
-- **运行时 API 技能自动生成**：扫描时自动为每个发现的类生成 API 文档技能，归入 `runtime-api` 分组
+- **零配置启动**：脚本无需导出 `name`/`execute`/`onLoad`，顶层代码直接运行
+- **自动命名**：不导出 `name` 时用文件名（`hello.ts` → `hello`）
+- **TypeScript 编译**：内嵌 TypeScript 4.9.5 编译器，`.ts` → `.js`
+- **Kotlin object 自动注入**：`AgentManager`、`ConfigManager`、`MiraiToolImpl` 等单例脚本中直接使用
+- **普通类自动注入**：其他类注入为构造函数代理，`new ClassName(...)` 创建实例
+- **运行时 API 技能自动生成**：扫描时自动为每个类生成 API 文档技能，归入 `runtime-api` 分组
+- **真协程**：`coroutine.launch()` 启动后台异步任务，脚本卸载时自动取消
+- **ctx 主动发消息**：`ctx.sendGroupMessage()`/`ctx.sendMessage()`/`ctx.setTimer()`
+- **生命周期钩子**：可导出 `onLoad()` / `onUnload()` 函数
+- **生命周期安全**：onLoad 超时(10s)、循环依赖检测、onUnload 异常不阻止卸载
 
-**生命周期安全机制：**
-- `onLoad` 超时保护（10 秒），超时则脚本加载失败
-- `onLoad` 异常 → 脚本不注册，返回明确错误
-- `onUnload` 异常 → 强制继续卸载，不留下僵尸工具
-- 循环依赖检测 → 防止脚本互相调用导致栈溢出
+**三种模式：**
 
 ```typescript
-var name = "hello";
-var description = "打招呼工具";
-var parameters = {
-    type: "object",
-    properties: { name: { type: "string", description: "用户名" } },
-    required: ["name"]
-};
+// 1. 顶层直接执行（不导出任何东西）
+var bot = MiraiToolImpl.bot;
+java.lang.System.out.println("Bot: " + bot.getNick());
 
+// 2. 定义工具（导出 execute）
+var name = "hello";
+var description = "打招呼";
 async function execute(ctx, args) {
-    return {
-        toAgent: "greeted " + args.name,
-        userReply: "你好 " + args.name + "！"
-    };
+    return { toAgent: "hi", userReply: "你好！" };
 }
+
+// 3. 插件模式（导出 onLoad/onUnload）
+var name = "my_plugin";
+function onLoad() { /* 初始化 */ }
+function onUnload() { /* 清理 */ }
 ```
 
-脚本中可直接使用注入的类（无需 import）：
+**ctx API（仅在 execute 内可用）：**
+- `ctx.userId` / `ctx.conversationId` / `ctx.groupId` — 只读属性
+- `ctx.sendGroupMessage(groupId, text)` — 发群消息
+- `ctx.sendMessage(targetId, text)` — 发私聊消息
+- `ctx.setTimer(intervalMs, callback)` — 定时器，返回 `timer.cancel()`
 
+**协程：**
 ```typescript
-// Java 标准库
-var f = new File("./config/config.json");
-var content = Files.readString(f.toPath());
-var now = LocalDateTime.now();
+coroutine.launch(function(co) {
+    co.delay(5000);                        // 非阻塞延迟
+    ctx.sendGroupMessage("123", "5秒后");  // execute 内可用 ctx
+});
+```
 
-// Kotlin object 单例（自动注入 INSTANCE）
+**运行时访问（无需 import）：**
+```typescript
 var agents = AgentManager.all();
 var config = ConfigManager.loadOrCreate();
-var bot = MiraiToolImpl.bot;  // 通过 object 访问 Bot 实例
-var skills = SkillManager.all();
-
-// kotlinx.serialization.json
-var obj = buildJsonObject({ put("key", JsonPrimitive("value")) });
+var bot = MiraiToolImpl.bot;
+var f = new File("./config/config.json");
+var content = Files.readString(f.toPath());
 ```
 
-**插件模式**（有 `onLoad`/`onUnload`，`execute` 可选）：
-
-```typescript
-var name = "my_plugin";
-var description = "示例插件";
-
-function onLoad() {
-    // 脚本加载时执行：注册事件监听、定时任务等
-    var bot = MiraiToolImpl.bot;
-    java.lang.System.out.println("Bot: " + bot.getNick());
-}
-
-function onUnload() {
-    // 脚本卸载时清理资源
-}
-
-// execute 可选——纯插件可以不定义工具
-async function execute(ctx, args) {
-    return { toAgent: "ok" };
-}
-```
-
-根应用提供 `manage_scripts` 工具，Agent 可通过该工具按需加载/卸载/重载脚本。
+根应用提供 `manage_scripts` 工具，Agent 可按需加载/卸载/重载脚本。启动时自动加载所有 `.ts` 文件。
 
 ### 上下文管理
 
