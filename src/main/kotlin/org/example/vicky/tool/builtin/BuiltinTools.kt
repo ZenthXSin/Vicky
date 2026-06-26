@@ -1,5 +1,6 @@
 package org.example.vicky.tool.builtin
 
+import org.example.vicky.agent.AgentConfig
 import org.example.vicky.file.FileIndexService
 import org.example.vicky.generated.ToolRegistry
 import org.example.vicky.memory.DistillationScheduler
@@ -13,11 +14,13 @@ object BuiltinTools {
         memoryStore: MemoryStore? = null,
         fileIndexService: FileIndexService? = null,
         distillationScheduler: DistillationScheduler? = null,
+        agentConfig: AgentConfig? = null,
     ): List<Tool> {
         BuiltinToolImpl.baseDir = baseDir
         BuiltinToolImpl.memoryStore = memoryStore
         BuiltinToolImpl.fileIndexService = fileIndexService
         BuiltinToolImpl.distillationScheduler = distillationScheduler
+        if (agentConfig != null) BuiltinToolImpl.agentConfig = agentConfig
         return ToolRegistry.tools("builtin")
     }
 }

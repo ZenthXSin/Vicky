@@ -15,3 +15,4 @@ rootProject.name = "Vicky"
 include("src:main:vicky-core")
 include("src:main:vicky-ksp")
 include("src:main:vicky-script")
+include("src:main:vicky-vibe")

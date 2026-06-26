@@ -230,6 +230,7 @@ object ConfigManager {
         val skillsDir = File(configDir, "skills")
         skillsDir.mkdirs()
         syncResource("skills/script-writing/SKILL.md", File(skillsDir, "script-writing/SKILL.md"))
+        syncResource("skills/vibe-usage/SKILL.md", File(skillsDir, "vibe-usage/SKILL.md"))
     }
 
     private fun generateDefaults(configDir: File): Pair<ConfigData, String> {

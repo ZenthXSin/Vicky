@@ -40,4 +40,7 @@ data class AgentConfig(
     val messageBufferRawTruncate: Int = 500,
     val name: String? = null,
     val id: String = java.util.UUID.randomUUID().toString(),
+    // LLM 调用超时（毫秒）与重试次数
+    val llmTimeoutMs: Long = 120_000L,
+    val llmMaxRetries: Int = 2,
 )

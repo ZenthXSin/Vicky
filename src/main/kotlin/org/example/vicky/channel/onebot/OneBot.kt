@@ -421,7 +421,7 @@ class OneBot(
             super.initTools()
             if (config.builtinTools) {
                 val baseDir = java.io.File(System.getProperty("user.dir"))
-                org.example.vicky.tool.builtin.BuiltinTools.all(baseDir, memoryStore, fileIndexService, distillationScheduler)
+                org.example.vicky.tool.builtin.BuiltinTools.all(baseDir, memoryStore, fileIndexService, distillationScheduler, agentConfig = config)
                     .forEach { tools.register(it) }
                 toolManagementTool = org.example.vicky.tool.builtin.ToolManagementTool { onToolStatesChanged() }
                 tools.register(toolManagementTool!!)
@@ -450,6 +450,20 @@ class OneBot(
                     }
                     org.example.vicky.script.ScriptManager.logStats()
                 }
+            }
+        }
+
+        override suspend fun onMessageEmitted(out: OutboundMessage) {
+            when (out) {
+                is OutboundMessage.AgentReply -> buffer.store(
+                    out.conversationId,
+                    BufferedMessage(text = out.content, richMedia = emptyList(), raw = out.content, userId = config.id, senderName = name ?: config.id),
+                )
+                is OutboundMessage.ToolReply -> buffer.store(
+                    out.conversationId,
+                    BufferedMessage(text = out.content, richMedia = emptyList(), raw = out.content, userId = config.id, senderName = name ?: config.id, msgRef = out.toolName),
+                )
+                else -> {}
             }
         }
 

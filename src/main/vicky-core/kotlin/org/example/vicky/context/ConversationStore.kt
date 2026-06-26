@@ -14,7 +14,8 @@ class ConversationStore(
 
     fun history(conversationId: String): MutableList<ChatMessage> {
         accessOrder[conversationId] = System.currentTimeMillis()
-        val list = histories.getOrPut(conversationId) { mutableListOf() }
+        // computeIfAbsent 是 ConcurrentHashMap 的原子操作，避免并发创建多个 list
+        val list = histories.computeIfAbsent(conversationId) { mutableListOf() }
         evictIfNeeded()
         return list
     }

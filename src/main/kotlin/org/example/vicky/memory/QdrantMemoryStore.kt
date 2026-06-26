@@ -14,6 +14,9 @@ class QdrantMemoryStore(
     private val embeddingClient: EmbeddingClient,
     private val collectionName: String = "vicky_memories",
     private val rawCollectionName: String = "vicky_memories_raw",
+    private val rawRetentionDays: Long = 30,
+    private val distilledRetentionDays: Long = 7,
+    private val expiryDays: Long = 90,
 ) : MemoryStore {
 
     private var initialized = false
@@ -229,9 +232,6 @@ class QdrantMemoryStore(
     override suspend fun cleanup() {
         ensureInitialized()
         val now = Instant.now()
-        val rawRetentionDays = 30L
-        val distilledRetentionDays = 7L
-        val expiryDays = 90L
 
         // 清理已蒸馏的原始记忆（保留 7 天）— 仅加载 payload，不加载向量
         val allRaw = vectorStore.scrollPayloadOnly(rawCollectionName, 10000, null)

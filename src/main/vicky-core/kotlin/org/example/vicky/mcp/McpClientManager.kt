@@ -87,10 +87,19 @@ class McpClientManager : AutoCloseable {
     }
 
     override fun close() {
-        connections.forEach { (client, _) ->
-            runCatching { kotlinx.coroutines.runBlocking { client.close() } }
-        }
+        // 在独立线程中执行 suspend close，避免在协程上下文中 runBlocking 死锁
+        val conns = connections.toList()
         connections.clear()
+        if (conns.isNotEmpty()) {
+            val thread = Thread({
+                conns.forEach { (client, _) ->
+                    runCatching { kotlinx.coroutines.runBlocking { client.close() } }
+                }
+            }, "mcp-close")
+            thread.isDaemon = true
+            thread.start()
+            thread.join(5000) // 最多等 5 秒
+        }
         httpClient?.close()
         httpClient = null
     }

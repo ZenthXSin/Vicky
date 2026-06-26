@@ -8,6 +8,9 @@ import com.aallam.openai.api.core.Parameters
 import com.aallam.openai.api.chat.ToolCall
 import com.aallam.openai.api.chat.ToolType
 import com.aallam.openai.client.OpenAI
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import org.example.vicky.context.ContextManager
 import org.example.vicky.io.InboundMessage
@@ -19,6 +22,7 @@ import org.example.vicky.tool.ToolAuthorizer
 import org.example.vicky.tool.ToolContext
 import org.example.vicky.tool.ToolRegistry
 import org.example.vicky.tool.ToolResult
+import java.util.concurrent.ConcurrentHashMap
 import com.aallam.openai.api.chat.Tool as OAITool
 
 /**
@@ -36,6 +40,7 @@ abstract class Agent(
     private var cachedOaiTools: List<OAITool>? = null
 
     private var memoryInitialized = false
+    private val conversationMutexes = ConcurrentHashMap<String, Mutex>()
 
     init {
         AgentManager.register(this)
@@ -69,6 +74,9 @@ abstract class Agent(
     /** 子类 override 以在每轮开始时 recall 记忆并注入 history。默认无操作。 */
     protected open suspend fun onTurnStart(msg: InboundMessage, history: MutableList<ChatMessage>) {}
 
+    /** 子类 override 以在消息发出后同步存储到消息缓冲区等。默认无操作。 */
+    protected open suspend fun onMessageEmitted(out: OutboundMessage) {}
+
     /** 运行时注册工具。 */
     fun registerTool(tool: Tool) {
         tools.register(tool)
@@ -83,11 +91,23 @@ abstract class Agent(
 
     /**
      * 入口：外部把收到的消息丢进来。
+     * 同一 conversationId 串行执行，避免并发修改 history。
      */
     suspend fun receive(
         msg: InboundMessage,
         replySink: MessageSink? = null,
         clearContextAfter: Boolean = false,
+    ) {
+        val mutex = conversationMutexes.getOrPut(msg.conversationId) { Mutex() }
+        mutex.withLock {
+            receiveInternal(msg, replySink, clearContextAfter)
+        }
+    }
+
+    private suspend fun receiveInternal(
+        msg: InboundMessage,
+        replySink: MessageSink?,
+        clearContextAfter: Boolean,
     ) {
         if (!memoryInitialized) {
             memoryInitialized = true
@@ -111,6 +131,7 @@ abstract class Agent(
         suspend fun emit(out: OutboundMessage) {
             sink.emit(out)
             replySink?.emit(out)
+            onMessageEmitted(out)
         }
 
         suspend fun log(message: String) {
@@ -125,6 +146,8 @@ abstract class Agent(
         contextManager.ensureContextBudget(history)
 
         var assistantReply: String? = null
+        // 记录 wrap-up 注入的假消息，finally 里清理
+        var wrapUpMessage: ChatMessage? = null
 
         try {
             repeat(config.maxSteps) { step ->
@@ -138,7 +161,15 @@ abstract class Agent(
                 val assistant = completeChat(request, onDebug = if (config.debug) { s -> log(s) } else null)
                 history += assistant
 
-                val calls = assistant.toolCalls.orEmpty()
+                var calls = assistant.toolCalls.orEmpty()
+                // 兜底：模型把工具调用输出在 content 里（如 DeepSeek DSML 格式）
+                if (calls.isEmpty()) {
+                    val parsed = parseInlineToolCalls(assistant.content.orEmpty())
+                    if (parsed.isNotEmpty()) {
+                        calls = parsed
+                        log("step ${step + 1}: parsed ${parsed.size} inline tool calls from content")
+                    }
+                }
                 if (calls.isEmpty()) {
                     log("step ${step + 1}: no tool calls, finishing")
                     assistantReply = assistant.content
@@ -169,18 +200,23 @@ abstract class Agent(
                             log("step ${step + 1}: tool '$toolName' threw: ${e.message}")
                             ToolResult(toAgent = "Error executing '$toolName': ${e.message}")
                         }
+                    val toolContent = result.toAgent.let {
+                        if (it.length > MAX_TOOL_RESULT_CHARS) {
+                            log("step ${step + 1}: tool '$toolName' result truncated (${it.length} -> $MAX_TOOL_RESULT_CHARS chars)")
+                            it.take(MAX_TOOL_RESULT_CHARS) + "\n...(truncated)"
+                        } else it
+                    }
                     history += ChatMessage(
                         role = ChatRole.Tool,
                         toolCallId = call.id,
                         name = toolName,
-                        content = result.toAgent,
+                        content = toolContent,
                     )
                     result.userReply?.takeIf { it.isNotBlank() }?.let {
                         emit(OutboundMessage.ToolReply(msg.conversationId, msg.userId, msg.groupId, it, toolName))
                     }
                     if (result.endTurn) endTurn = true
                 }
-                contextManager.compactOldToolRounds(history)
                 contextManager.ensureContextBudget(history)
                 if (endTurn) {
                     log("step ${step + 1}: endTurn signaled, finishing turn")
@@ -189,13 +225,15 @@ abstract class Agent(
             }
             // 步数耗尽
             log("reached maxSteps (${config.maxSteps}); requesting a wrap-up summary")
-            history += ChatMessage(
-                role = ChatRole.User,
+            val wrapUpPrompt = ChatMessage(
+                role = ChatRole.System,
                 content = "System notice: the step budget for this turn is exhausted; no more tools can be " +
                     "called. Based on the information gathered so far, summarize the current situation and " +
                     "report your conclusion to the user, and explicitly note that some actions may be " +
                     "incomplete because the step limit was reached. Reply in the user's language.",
             )
+            history += wrapUpPrompt
+            wrapUpMessage = wrapUpPrompt
             val wrapUp = completeChat(
                 ChatCompletionRequest(
                     model = config.model,
@@ -221,6 +259,12 @@ abstract class Agent(
                 )
             }
         } finally {
+            // 清理 wrap-up 注入的假消息，不污染后续上下文
+            wrapUpMessage?.let { history.remove(it) }
+
+            // 任务结束后压缩已完成的 tool call 轮次
+            contextManager.compactOldToolRounds(history)
+
             onTurnEnd(msg, assistantReply)
 
             if (clearContextAfter) {
@@ -250,8 +294,34 @@ abstract class Agent(
     /**
      * 统一的 chat completion 入口：根据 [AgentConfig.streaming] 选择流式或一次性请求。
      * 两种模式的返回值语义一致：一条完整的 assistant [ChatMessage]，含拼装好的 content 与 toolCalls。
+     * 内置超时与重试。
      */
     private suspend fun completeChat(
+        request: ChatCompletionRequest,
+        onDebug: (suspend (String) -> Unit)? = null,
+    ): ChatMessage {
+        val timeoutMs = config.llmTimeoutMs
+        val maxRetries = config.llmMaxRetries
+        var lastException: Throwable? = null
+
+        repeat(maxRetries + 1) { attempt ->
+            try {
+                return withTimeout(timeoutMs) {
+                    completeChatOnce(request, onDebug)
+                }
+            } catch (e: Throwable) {
+                lastException = e
+                if (attempt < maxRetries) {
+                    val delayMs = 1000L * (attempt + 1)
+                    onDebug?.invoke("[retry] attempt ${attempt + 1} failed: ${e::class.simpleName}: ${e.message}, retrying in ${delayMs}ms")
+                    kotlinx.coroutines.delay(delayMs)
+                }
+            }
+        }
+        throw lastException!!
+    }
+
+    private suspend fun completeChatOnce(
         request: ChatCompletionRequest,
         onDebug: (suspend (String) -> Unit)? = null,
     ): ChatMessage {
@@ -343,7 +413,56 @@ abstract class Agent(
         return result
     }
 
+    /**
+     * 兜底解析：模型把工具调用以文本形式输出在 content 里（如 DeepSeek DSML 格式）。
+     * 格式示例：
+     * <｜｜DSML｜｜tool_calls>
+     * <｜｜DSML｜｜invoke name="tool_name">
+     * <｜｜DSML｜｜parameter name="key">value</｜｜DSML｜｜parameter>
+     * </｜｜DSML｜｜invoke>
+     * </｜｜DSML｜｜tool_calls>
+     */
+    private fun parseInlineToolCalls(content: String): List<ToolCall> {
+        if (!content.contains("DSML")) return emptyList()
+        val results = mutableListOf<ToolCall>()
+        val invokePattern = Regex(
+            """<\|?\|?DSML\|?\|?invoke\s+name="([^"]+)">(.*?)</\|?\|?DSML\|?\|?invoke>""",
+            RegexOption.DOT_MATCHES_ALL,
+        )
+        val paramPattern = Regex(
+            """<\|?\|?DSML\|?\|?parameter\s+name="([^"]+)"[^>]*>(.*?)</\|?\|?DSML\|?\|?parameter>""",
+            RegexOption.DOT_MATCHES_ALL,
+        )
+        for ((idx, match) in invokePattern.findAll(content).withIndex()) {
+            val toolName = match.groupValues[1]
+            val body = match.groupValues[2]
+            val args = mutableMapOf<String, kotlinx.serialization.json.JsonElement>()
+            for (paramMatch in paramPattern.findAll(body)) {
+                val key = paramMatch.groupValues[1]
+                val rawValue = paramMatch.groupValues[2].trim()
+                val jsonValue = rawValue.toIntOrNull()?.let { kotlinx.serialization.json.JsonPrimitive(it) }
+                    ?: rawValue.toLongOrNull()?.let { kotlinx.serialization.json.JsonPrimitive(it) }
+                    ?: rawValue.toBooleanStrictOrNull()?.let { kotlinx.serialization.json.JsonPrimitive(it) }
+                    ?: kotlinx.serialization.json.JsonPrimitive(rawValue)
+                args[key] = jsonValue
+            }
+            results += ToolCall.Function(
+                id = com.aallam.openai.api.chat.ToolId("inline_${idx}_$toolName"),
+                function = com.aallam.openai.api.chat.FunctionCall(
+                    nameOrNull = toolName,
+                    argumentsOrNull = kotlinx.serialization.json.JsonObject(args).toString(),
+                ),
+            )
+        }
+        return results
+    }
+
     override fun close() {
         AgentManager.unregister(id)
+    }
+
+    private companion object {
+        /** 工具结果最大字符数，超出截断。 */
+        const val MAX_TOOL_RESULT_CHARS = 30_000
     }
 }

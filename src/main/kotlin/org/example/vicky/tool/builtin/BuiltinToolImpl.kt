@@ -7,6 +7,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import org.example.vicky.agent.AgentConfig
 import org.example.vicky.annotations.ToolGroup
 import org.example.vicky.annotations.ToolParam
 import org.example.vicky.annotations.VickyTool
@@ -17,6 +18,8 @@ import org.example.vicky.memory.MemoryStore
 import org.example.vicky.tool.Tool
 import org.example.vicky.tool.ToolContext
 import org.example.vicky.tool.ToolResult
+import org.example.vicky.vibe.orchestrator.VibeOrchestrator
+import org.example.vicky.vibe.role.AgentRole
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -34,6 +37,7 @@ private fun safePath(baseDir: File, path: String): File? {
 @ToolGroup(name = "builtin")
 object BuiltinToolImpl {
     lateinit var baseDir: File
+    lateinit var agentConfig: AgentConfig
     var memoryStore: MemoryStore? = null
     var fileIndexService: FileIndexService? = null
     var distillationScheduler: DistillationScheduler? = null
@@ -382,5 +386,39 @@ object BuiltinToolImpl {
             }
             else -> ToolResult(toAgent = "error: unknown action '$action'. Must be list, enable, or disable.")
         }
+    }
+
+    // ─── vibe ────────────────────────────────────────────────
+
+    @VickyTool(
+        name = "vibe",
+        description = "Trigger a multi-stage vibe pipeline for complex tasks. " +
+            "Decomposes the request into 5 stages (General → Planning → Investigation → Writing → Review) " +
+            "and executes them sequentially with specialized agents. " +
+            "Use this for multi-step tasks that benefit from structured planning and review.",
+    )
+    suspend fun vibe(
+        @ToolParam(description = "The task request to process through the vibe pipeline. Be specific: include goals, constraints, and acceptance criteria.") request: String,
+    ): ToolResult {
+        val config = agentConfig.copy(agentMd = "", maxSteps = Int.MAX_VALUE)
+        val orchestrator = VibeOrchestrator(config)
+        val result = orchestrator.execute(request)
+
+        val sb = StringBuilder()
+        sb.appendLine("# Vibe Pipeline Result")
+        sb.appendLine()
+        for ((i, stage) in result.stages.withIndex()) {
+            val role = AgentRole.entries.getOrNull(i)
+            val icon = if (stage.pass == false) "✗" else "✓"
+            sb.appendLine("## $icon Stage ${i + 1} — ${role?.label ?: "?"}")
+            sb.appendLine("**Summary**: ${stage.summary}")
+            sb.appendLine()
+            sb.appendLine(stage.output)
+            sb.appendLine()
+        }
+        sb.appendLine("---")
+        sb.appendLine("**Tasks**: ${result.tasks.size} | **Elapsed**: ${result.elapsed}ms | **Success**: ${result.success}")
+
+        return ToolResult(toAgent = sb.toString().trimEnd())
     }
 }

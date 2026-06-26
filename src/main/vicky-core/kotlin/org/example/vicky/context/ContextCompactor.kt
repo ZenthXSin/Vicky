@@ -74,8 +74,9 @@ class ContextCompactor(
     // ── 机制一：轮数裁剪 ──────────────────────────────────────
 
     private fun trimMemoryRounds(history: MutableList<ChatMessage>) {
-        val systemMsg = history.firstOrNull { it.role == ChatRole.System }
-        val nonSystemMessages = history.filter { it.role != ChatRole.System }
+        val systemMsgs = history.filter { it.role == ChatRole.System }
+        val nonSystemStart = systemMsgs.size
+        val nonSystemMessages = history.subList(nonSystemStart, history.size)
 
         val userMessageIndices = nonSystemMessages
             .mapIndexedNotNull { i, m -> if (m.role == ChatRole.User) i else null }
@@ -83,12 +84,39 @@ class ContextCompactor(
         if (userMessageIndices.size <= config.maxMemoryRounds) return
 
         val roundsToTrim = userMessageIndices.size - config.maxMemoryRounds
-        val cutoffNonSystemIndex = userMessageIndices[roundsToTrim]
-        val cutoffHistoryIndex = cutoffNonSystemIndex + if (systemMsg != null) 1 else 0
+        var cutoffNonSystemIndex = userMessageIndices[roundsToTrim]
 
+        // 向后推进 cutoff，跳过 assistant(toolCalls) + tool(results) 轮次，
+        // 避免截断在 tool call 轮次中间导致 API 报错。
+        while (cutoffNonSystemIndex < nonSystemMessages.size) {
+            val m = nonSystemMessages[cutoffNonSystemIndex]
+            if (m.role == ChatRole.Tool) {
+                cutoffNonSystemIndex++
+                continue
+            }
+            if (m.role == ChatRole.Assistant && !m.toolCalls.isNullOrEmpty()) {
+                // 检查后续是否有对应的 Tool 结果
+                var hasToolResult = false
+                for (j in cutoffNonSystemIndex + 1 until nonSystemMessages.size) {
+                    if (nonSystemMessages[j].role == ChatRole.Tool) {
+                        hasToolResult = true
+                    } else {
+                        break
+                    }
+                }
+                if (hasToolResult) {
+                    // 跳过整个 tool call 轮次
+                    cutoffNonSystemIndex++
+                    continue
+                }
+            }
+            break
+        }
+
+        val cutoffHistoryIndex = cutoffNonSystemIndex + nonSystemStart
         val kept = history.subList(cutoffHistoryIndex, history.size).toMutableList()
         history.clear()
-        if (systemMsg != null) history.add(systemMsg)
+        history.addAll(systemMsgs)
         history.addAll(kept)
     }
 
