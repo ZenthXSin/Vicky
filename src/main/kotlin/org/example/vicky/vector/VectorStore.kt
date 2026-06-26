@@ -63,4 +63,7 @@ interface VectorStore {
 
     /** 确保 collection 存在，不存在则创建。 */
     suspend fun ensureCollection(collection: String, dimension: Int)
+
+    /** 按 ID 更新记录的 payload 字段（不影响向量）。 */
+    suspend fun setPayload(collection: String, ids: List<String>, payload: Map<String, Any>)
 }

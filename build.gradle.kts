@@ -15,6 +15,24 @@ repositories {
     mavenCentral()
 }
 
+configurations.all {
+    resolutionStrategy {
+        // 强制所有 ktor 模块统一版本，避免 openai-client / overflow-core 拉入不兼容版本
+        force("io.ktor:ktor-client-core:3.4.3")
+        force("io.ktor:ktor-client-okhttp:3.4.3")
+        force("io.ktor:ktor-client-cio:3.4.3")
+        force("io.ktor:ktor-client-content-negotiation:3.4.3")
+        force("io.ktor:ktor-serialization-kotlinx-json:3.4.3")
+        force("io.ktor:ktor-http:3.4.3")
+        force("io.ktor:ktor-http-cio:3.4.3")
+        force("io.ktor:ktor-network:3.4.3")
+        force("io.ktor:ktor-network-tls:3.4.3")
+        force("io.ktor:ktor-websockets:3.4.3")
+        force("io.ktor:ktor-client-auth:3.4.3")
+        force("io.ktor:ktor-client-logging:3.4.3")
+    }
+}
+
 dependencies {
     implementation(project(":src:main:vicky-core"))
     implementation(project(":src:main:vicky-script"))
@@ -31,6 +49,24 @@ dependencies {
     ksp(project(":src:main:vicky-ksp"))
 
     testImplementation(kotlin("test"))
+}
+
+// --- KSP 稳定性保障 ---
+afterEvaluate {
+    // 1. 强制 kspKotlin 每次都执行，防止增量缓存误判 UP-TO-DATE 导致生成代码缺失
+    tasks.findByName("kspKotlin")?.let { kspTask ->
+        kspTask.outputs.upToDateWhen { false }
+
+        // 2. 显式声明 compileKotlin 依赖 kspKotlin，确保生成代码先于编译
+        tasks.findByName("compileKotlin")?.dependsOn(kspTask)
+    }
+
+    // 3. 将 KSP 生成的源码目录注册到 sourceSet，防止 Gradle 漏掉
+    kotlin {
+        sourceSets.named("main") {
+            kotlin.srcDir("build/generated/ksp/main/kotlin")
+        }
+    }
 }
 
 kotlin {

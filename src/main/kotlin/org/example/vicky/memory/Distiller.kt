@@ -18,6 +18,7 @@ import org.example.vicky.llm.EmbeddingClient
 class Distiller(
     private val openAi: OpenAI,
     private val embeddingClient: EmbeddingClient,
+    private val model: ModelId = ModelId("deepseek-v4-flash"),
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -29,7 +30,7 @@ class Distiller(
 
         val prompt = buildDistillationPrompt(conversations)
         val request = ChatCompletionRequest(
-            model = ModelId("deepseek-v4-flash"),
+            model = model,
             messages = listOf(
                 ChatMessage(role = ChatRole.System, content = DISTILLATION_SYSTEM_PROMPT),
                 ChatMessage(role = ChatRole.User, content = prompt),

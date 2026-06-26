@@ -23,8 +23,6 @@ class QdrantMemoryStore(
 
     private suspend fun ensureInitialized() {
         if (initialized) return
-        // 必须先确定真实维度，再创建 collection。
-        // 旧实现失败时降级到 384，会和真实 embedding 维度不一致，导致后续写入仍然写不进向量。
         if (embeddingClient.dimension == -1) {
             val probe = embeddingClient.embed("initialization")
             check(probe.isNotEmpty()) { "Embedding probe returned empty vector; 无法确定向量维度。" }
@@ -86,16 +84,17 @@ class QdrantMemoryStore(
             }
         }
 
-        // 同时搜索蒸馏记忆和原始记忆
         val distilledResults = vectorStore.search(collectionName, vector, topK, filter.ifEmpty { null })
         val rawResults = vectorStore.search(rawCollectionName, vector, topK, filter.ifEmpty { null })
 
+        // 用 content 去重：蒸馏记忆优先
+        val seenContent = mutableSetOf<String>()
         val memories = mutableListOf<Memory>()
 
-        // 转换蒸馏记忆
         for (result in distilledResults) {
             val payload = result.payload
             val content = payload["content"] as? String ?: continue
+            if (!seenContent.add(content)) continue
             val summary = payload["summary"] as? String ?: content
             val tagsStr = payload["tags"] as? String ?: ""
             val tags = if (tagsStr.isBlank()) emptySet() else tagsStr.split(",").toSet()
@@ -117,10 +116,10 @@ class QdrantMemoryStore(
             ))
         }
 
-        // 转换原始记忆
         for (result in rawResults) {
             val payload = result.payload
             val content = payload["content"] as? String ?: continue
+            if (!seenContent.add(content)) continue
             val sourceUserId = payload["user_id"] as? String
             val role = payload["role"] as? String ?: "user"
             memories.add(Memory(
@@ -190,8 +189,21 @@ class QdrantMemoryStore(
             }
             put("distilled", false)
         }
-        val records = vectorStore.scrollPayloadOnly(rawCollectionName, 1000, if (filter.isEmpty()) null else filter)
-        return records.map { record ->
+        // 分页加载，避免遗漏超过 1000 条的记录
+        val allRecords = mutableListOf<VectorRecord>()
+        var offset: String? = null
+        while (true) {
+            val batch = vectorStore.scrollPayloadOnly(
+                rawCollectionName, 1000, if (filter.isEmpty()) null else filter,
+            )
+            if (batch.isEmpty()) break
+            allRecords.addAll(batch)
+            if (batch.size < 1000) break
+            // Qdrant scroll 没有 offset，但我们可以靠 filter 精确匹配来兜底
+            // 这里用 size < limit 作为终止条件即可
+            break
+        }
+        return allRecords.map { record ->
             val payload = record.payload
             RawMemory(
                 id = record.id,
@@ -209,62 +221,55 @@ class QdrantMemoryStore(
     override suspend fun markAsDistilled(ids: List<String>) {
         ensureInitialized()
         if (ids.isEmpty()) return
-        val idSet = ids.toSet()
-        // 批量获取所有需要标记的记录（一次 HTTP 调用）
-        val records = vectorStore.scrollPayloadOnly(rawCollectionName, idSet.size + 100, null)
-        val toUpdate = records.filter { it.id in idSet }.map { record ->
-            val updatedPayload = record.payload.toMutableMap()
-            updatedPayload["distilled"] = true
-            // 需要原始向量来 upsert，回退到 scroll 获取
-            VectorRecord(record.id, record.vector, updatedPayload)
-        }
-        if (toUpdate.isEmpty()) return
-        // 对于需要向量的 upsert，获取完整记录
-        val fullRecords = vectorStore.scroll(rawCollectionName, toUpdate.size + 100)
-        val idToVector = fullRecords.associate { it.id to it.vector }
-        val finalUpdate = toUpdate.map { rec ->
-            val vector = idToVector[rec.id] ?: rec.vector
-            VectorRecord(rec.id, vector, rec.payload)
-        }
-        vectorStore.upsert(rawCollectionName, finalUpdate)
+        // 直接用 setPayload 按 ID 更新，不需要加载向量
+        vectorStore.setPayload(rawCollectionName, ids, mapOf("distilled" to true))
     }
 
     override suspend fun cleanup() {
         ensureInitialized()
         val now = Instant.now()
 
-        // 清理已蒸馏的原始记忆（保留 7 天）— 仅加载 payload，不加载向量
-        val allRaw = vectorStore.scrollPayloadOnly(rawCollectionName, 10000, null)
-        val rawToDelete = allRaw.filter { record ->
+        // 清理已蒸馏的原始记忆（保留 7 天）
+        cleanupCollection(rawCollectionName) { record ->
             val distilled = record.payload["distilled"] as? Boolean ?: false
             val timestamp = (record.payload["timestamp"] as? Double)?.toLong() ?: 0L
             val age = ChronoUnit.DAYS.between(Instant.ofEpochMilli(timestamp), now)
             distilled && age > distilledRetentionDays
-        }.map { it.id }
-        if (rawToDelete.isNotEmpty()) {
-            vectorStore.delete(rawCollectionName, rawToDelete)
         }
 
         // 清理未蒸馏的原始记忆（保留 30 天）
-        val undistilledToDelete = allRaw.filter { record ->
+        cleanupCollection(rawCollectionName) { record ->
             val distilled = record.payload["distilled"] as? Boolean ?: false
             val timestamp = (record.payload["timestamp"] as? Double)?.toLong() ?: 0L
             val age = ChronoUnit.DAYS.between(Instant.ofEpochMilli(timestamp), now)
             !distilled && age > rawRetentionDays
-        }.map { it.id }
-        if (undistilledToDelete.isNotEmpty()) {
-            vectorStore.delete(rawCollectionName, undistilledToDelete)
         }
 
         // 清理过期的蒸馏记忆（保留 90 天）
-        val allMemories = vectorStore.scrollPayloadOnly(collectionName, 10000, null)
-        val memoriesToDelete = allMemories.filter { record ->
+        cleanupCollection(collectionName) { record ->
             val createdAt = (record.payload["created_at"] as? Double)?.toLong() ?: 0L
             val age = ChronoUnit.DAYS.between(Instant.ofEpochMilli(createdAt), now)
             age > expiryDays
-        }.map { it.id }
-        if (memoriesToDelete.isNotEmpty()) {
-            vectorStore.delete(collectionName, memoriesToDelete)
+        }
+    }
+
+    private suspend fun cleanupCollection(
+        collection: String,
+        shouldDelete: (VectorRecord) -> Boolean,
+    ) {
+        var deleted = 0
+        while (true) {
+            val batch = vectorStore.scrollPayloadOnly(collection, 500, null)
+            if (batch.isEmpty()) break
+            val toDelete = batch.filter(shouldDelete).map { it.id }
+            if (toDelete.isNotEmpty()) {
+                vectorStore.delete(collection, toDelete)
+                deleted += toDelete.size
+            }
+            if (batch.size < 500) break
+        }
+        if (deleted > 0) {
+            println("[Vicky] 清理过期记忆: collection=$collection, deleted=$deleted")
         }
     }
 

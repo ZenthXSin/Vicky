@@ -4,6 +4,7 @@ import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.post
@@ -41,6 +42,11 @@ class QdrantVectorStore(
     private val client = HttpClient(OkHttp) {
         install(ContentNegotiation) {
             json(json)
+        }
+        install(HttpTimeout) {
+            connectTimeoutMillis = 3_000
+            requestTimeoutMillis = 5_000
+            socketTimeoutMillis = 5_000
         }
     }
 
@@ -305,6 +311,26 @@ class QdrantVectorStore(
         }
         element is kotlinx.serialization.json.JsonArray -> element.map { fromJsonElement(it) }
         else -> element.toString()
+    }
+
+    override suspend fun setPayload(collection: String, ids: List<String>, payload: Map<String, Any>) {
+        if (ids.isEmpty()) return
+        withContext(Dispatchers.IO) {
+            val body = buildJsonObject {
+                put("points", kotlinx.serialization.json.JsonArray(ids.map { kotlinx.serialization.json.JsonPrimitive(it) }))
+                put("payload", buildJsonObject {
+                    payload.forEach { (key, value) -> put(key, toJsonElement(value)) }
+                })
+            }
+            val response = client.post("$baseUrl/collections/$collection/points/payload") {
+                contentType(ContentType.Application.Json)
+                setBody(body.toString())
+            }
+            if (!response.status.isSuccess()) {
+                val errorBody = response.body<String>()
+                throw RuntimeException("Qdrant setPayload failed: ${response.status} - $errorBody")
+            }
+        }
     }
 
     fun close() {

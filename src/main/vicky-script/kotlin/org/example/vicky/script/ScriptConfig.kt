@@ -16,7 +16,7 @@ data class ScriptConfig(
 
 data class TsCompilerOptions(
     val target: String = "ES5",
-    val module: String = "ES2015",
+    val module: String = "None",
     val strict: Boolean = true,
 )
 

@@ -74,7 +74,9 @@ fun main() = runBlocking {
     val commandRegistry = oneBot.commandRegistry
 
     // ─── 控制台命令注册 ───
-    // TODO: 在此注册控制台专用命令
+    val scriptsDir = java.io.File(ConfigManager.getConfigDir(), "scripts")
+    org.example.vicky.command.ScriptCommands.all(scriptsDir, agent.tools)
+        .forEach { commandRegistry.register(it) }
 
     val consoleSink = MessageSink { out ->
         when (out) {

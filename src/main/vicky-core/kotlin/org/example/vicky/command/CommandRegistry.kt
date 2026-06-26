@@ -11,6 +11,19 @@ class CommandRegistry {
     /** name → Command 的正向映射（用于 snapshot 去重）。 */
     private val byName = ConcurrentHashMap<String, Command>()
 
+    init {
+        register(command("help", "显示所有可用命令", listOf("h")) { _, _ ->
+            val all = snapshot()
+            if (all.isEmpty()) return@command CommandResult(reply = "暂无可用命令")
+            val sb = StringBuilder("可用命令:\n")
+            for (cmd in all.sortedBy { it.name }) {
+                val aliases = if (cmd.aliases.isNotEmpty()) " (${cmd.aliases.joinToString(", ") { "/$it" }})" else ""
+                sb.appendLine("  /${cmd.name}$aliases — ${cmd.description}")
+            }
+            CommandResult(reply = sb.toString().trimEnd())
+        })
+    }
+
     fun register(command: Command) {
         byName[command.name] = command
         commands[command.name] = command

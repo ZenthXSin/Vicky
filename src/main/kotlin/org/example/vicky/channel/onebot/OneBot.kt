@@ -128,6 +128,10 @@ class OneBot(
             "essence_message", "group_files", "group_whitelist_add", "manage_tools", "manage_skills", "manage_scripts"
         ).forEach { adminToolList.add(it) }
         agent = OneBotAgent(agentConfig, memoryConfig, bot!!, buffer, adminList, adminToolList)
+        // 注册脚本管理命令（必须在 agent 构造完成后，因为 initTools 在构造函数中调用时 commandRegistry 尚未就绪）
+        val scriptsDir = java.io.File(org.example.vicky.config.ConfigManager.getConfigDir(), "scripts")
+        org.example.vicky.command.ScriptCommands.all(scriptsDir, agent.tools)
+            .forEach { commandRegistry.register(it) }
         registerListeners()
         return true
     }
@@ -415,6 +419,7 @@ class OneBot(
         private var memoryStore: QdrantMemoryStore? = null
         private var fileIndexService: FileIndexService? = null
         private var distillationScheduler: DistillationScheduler? = null
+        private val memoryCircuitBreaker = org.example.vicky.vector.CircuitBreaker(failureThreshold = 3, cooldownMs = 120_000)
 
         override fun initMemory() {
             val embeddingClient = memConfig.embedding?.let { EmbeddingClientFactory.create(it) }
@@ -457,7 +462,7 @@ class OneBot(
 
                 if (memConfig.distillationEnabled) {
                     val openAi = org.example.vicky.llm.OpenAiClientFactory.create(config)
-                    val distiller = Distiller(openAi, embeddingClient)
+                    val distiller = Distiller(openAi, embeddingClient, config.model)
                     distillationScheduler = DistillationScheduler(memoryStore!!, distiller, memConfig.distillationMaxConversations, true)
                 }
             }
@@ -518,6 +523,7 @@ class OneBot(
                     org.example.vicky.script.ScriptManager.logStats()
                 }
             }
+
         }
 
         override suspend fun onMessageEmitted(out: OutboundMessage) {
@@ -536,8 +542,12 @@ class OneBot(
 
         override suspend fun onTurnStart(msg: InboundMessage, history: MutableList<ChatMessage>) {
             if (memoryStore == null || !memConfig.memoryEnabled) return
+            if (!memoryCircuitBreaker.allowRequest()) return
             try {
-                val memories = memoryStore!!.recall(msg.content, msg.userId, memConfig.memoryTopK)
+                val memories = kotlinx.coroutines.withTimeout(5_000) {
+                    memoryStore!!.recall(msg.content, msg.userId, memConfig.memoryTopK)
+                }
+                memoryCircuitBreaker.recordSuccess()
                 if (memories.isNotEmpty()) {
                     var budget = memConfig.memoryTokenBudget
                     val memSb = StringBuilder()
@@ -554,23 +564,35 @@ class OneBot(
                         history.add(1, ChatMessage(role = ChatRole.System, content = memoryText))
                     }
                 }
+            } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+                memoryCircuitBreaker.recordFailure()
+                println("[Vicky] 记忆读取超时 (5s)，跳过")
             } catch (e: Exception) {
+                memoryCircuitBreaker.recordFailure()
                 println("[Vicky] 记忆读取失败: ${e.message}")
             }
         }
 
         override suspend fun onTurnEnd(msg: InboundMessage, assistantReply: String?) {
             if (memoryStore == null || !memConfig.memoryEnabled) return
+            if (!memoryCircuitBreaker.allowRequest()) return
             try {
-                val rawMemories = mutableListOf<RawMemory>()
-                rawMemories.add(RawMemory(userId = msg.userId, conversationId = msg.conversationId, role = "user", content = msg.content))
-                if (assistantReply != null) {
-                    rawMemories.add(RawMemory(userId = msg.userId, conversationId = msg.conversationId, role = "assistant", content = assistantReply))
+                kotlinx.coroutines.withTimeout(5_000) {
+                    val rawMemories = mutableListOf<RawMemory>()
+                    rawMemories.add(RawMemory(userId = msg.userId, conversationId = msg.conversationId, role = "user", content = msg.content))
+                    if (assistantReply != null) {
+                        rawMemories.add(RawMemory(userId = msg.userId, conversationId = msg.conversationId, role = "assistant", content = assistantReply))
+                    }
+                    for (raw in rawMemories) {
+                        memoryStore!!.rememberRaw(raw)
+                    }
                 }
-                for (raw in rawMemories) {
-                    memoryStore!!.rememberRaw(raw)
-                }
+                memoryCircuitBreaker.recordSuccess()
+            } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+                memoryCircuitBreaker.recordFailure()
+                println("[Vicky] 记忆保存超时 (5s)，跳过")
             } catch (e: Exception) {
+                memoryCircuitBreaker.recordFailure()
                 println("[Vicky] 原始记忆保存失败 (${e::class.simpleName}): ${e.message}")
                 if (config.debug) e.printStackTrace()
             }

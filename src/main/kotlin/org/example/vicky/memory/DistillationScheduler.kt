@@ -49,22 +49,29 @@ class DistillationScheduler(
      * 立即执行一次蒸馏。
      */
     suspend fun distillNow() {
-        val undistilled = memoryStore.getUndistilledRawMemories()
-        if (undistilled.isEmpty()) return
+        try {
+            val undistilled = memoryStore.getUndistilledRawMemories()
+            if (undistilled.isEmpty()) return
 
-        val grouped = undistilled.groupBy { Triple(it.userId, it.conversationId, it.turnIndex) }
-        val groupsToProcess = grouped.entries.take(maxConversations)
+            val grouped = undistilled.groupBy { Triple(it.userId, it.conversationId, it.turnIndex) }
+            val groupsToProcess = grouped.entries.take(maxConversations)
 
-        for ((key, messages) in groupsToProcess) {
-            val memories = distiller.distill(messages)
-            for (memory in memories) {
-                memoryStore.remember(memory)
+            for ((key, messages) in groupsToProcess) {
+                try {
+                    val memories = distiller.distill(messages)
+                    for (memory in memories) {
+                        memoryStore.remember(memory)
+                    }
+                    memoryStore.markAsDistilled(messages.map { it.id })
+                } catch (e: Exception) {
+                    println("[Vicky] 蒸馏会话失败 (${key.first}/${key.second}/${key.third}): ${e.message}")
+                }
             }
-            val ids = messages.map { it.id }
-            memoryStore.markAsDistilled(ids)
-        }
 
-        memoryStore.cleanup()
+            memoryStore.cleanup()
+        } catch (e: Exception) {
+            println("[Vicky] 蒸馏任务异常: ${e.message}")
+        }
     }
 
     /**

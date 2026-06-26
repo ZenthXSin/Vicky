@@ -1,5 +1,6 @@
 package org.example.vicky.script
 
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -26,40 +27,53 @@ class ScriptEngine {
 
     /**
      * 编译 TypeScript → JavaScript。
+     * 在独立大栈线程中执行，避免 Rhino 深度 AST 递归导致 StackOverflow。
      */
     fun compileTs(tsSource: String, fileName: String, options: TsCompilerOptions = TsCompilerOptions()): String {
-        val ctx = Context.enter()
-        try {
-            ctx.optimizationLevel = -1 // 解释模式，兼容所有平台
-            val scope = ctx.initStandardObjects()
+        var result: String? = null
+        var error: Throwable? = null
 
-            val tscCode = loadTypeScriptCompiler()
-            ctx.evaluateString(scope, tscCode, "typescript.js", 1, null)
+        val thread = Thread(null, {
+            val ctx = Context.enter()
+            try {
+                ctx.optimizationLevel = -1
+                val scope = ctx.initStandardObjects()
 
-            val escaped = escapeForTemplateLiteral(tsSource)
-            val result = ctx.evaluateString(
-                scope,
-                """
-                (function() {
-                    var result = ts.transpileModule(`$escaped`, {
-                        compilerOptions: {
-                            target: ts.ScriptTarget.${options.target},
-                            module: ts.ModuleKind.${options.module},
-                            strict: ${options.strict},
-                            esModuleInterop: true,
-                            skipLibCheck: true
-                        },
-                        fileName: "$fileName"
-                    });
-                    return result.outputText;
-                })()
-                """.trimIndent(),
-                fileName, 1, null
-            )
-            return Context.toString(result)
-        } finally {
-            Context.exit()
-        }
+                val tscCode = loadTypeScriptCompiler()
+                ctx.evaluateString(scope, tscCode, "typescript.js", 1, null)
+
+                val escaped = escapeForTemplateLiteral(tsSource)
+                val jsResult = ctx.evaluateString(
+                    scope,
+                    """
+                    (function() {
+                        var result = ts.transpileModule(`$escaped`, {
+                            compilerOptions: {
+                                target: ts.ScriptTarget.${options.target},
+                                module: ts.ModuleKind.${options.module},
+                                strict: ${options.strict},
+                                esModuleInterop: true,
+                                skipLibCheck: true
+                            },
+                            fileName: "$fileName"
+                        });
+                        return result.outputText;
+                    })()
+                    """.trimIndent(),
+                    fileName, 1, null
+                )
+                result = Context.toString(jsResult)
+            } catch (e: Throwable) {
+                error = e
+            } finally {
+                Context.exit()
+            }
+        }, "ts-compile-${fileName}", COMPILER_STACK_SIZE)
+
+        thread.start()
+        thread.join()
+        error?.let { throw it }
+        return result ?: throw ScriptException("TypeScript compilation returned null for $fileName")
     }
 
     /**
@@ -71,6 +85,7 @@ class ScriptEngine {
             ctx.optimizationLevel = -1
             val scope = ctx.initStandardObjects()
             injectPrintln(ctx, scope)
+            injectTimers(ctx, scope)
             ClassAutoRegistry.injectAll(ctx, scope)
 
             // 注入 Promise polyfill（Rhino 原生不支持 Promise，TS async 编译产物需要它）
@@ -176,7 +191,9 @@ class ScriptEngine {
                             val doubleVal = value.content.toDoubleOrNull()
                             val boolVal = value.content.toBooleanStrictOrNull()
                             when {
-                                intVal != null -> ScriptableObject.putProperty(jsArgs, key, intVal)
+                                // 用 Double 传递所有数字，避免 Java Integer 等装箱类型
+                                // 在 JS 引擎中 Number(javaObj) 返回 NaN 的问题
+                                intVal != null -> ScriptableObject.putProperty(jsArgs, key, intVal.toDouble())
                                 doubleVal != null -> ScriptableObject.putProperty(jsArgs, key, doubleVal)
                                 boolVal != null -> ScriptableObject.putProperty(jsArgs, key, boolVal)
                                 else -> ScriptableObject.putProperty(jsArgs, key, value.content)
@@ -343,6 +360,83 @@ class ScriptEngine {
         ScriptableObject.putProperty(scope, "print", printFn)
     }
 
+    /** 注入 setInterval / clearInterval / setTimeout / clearTimeout 到全局 scope。 */
+    private fun injectTimers(ctx: Context, scope: ScriptableObject) {
+        val timers = ConcurrentHashMap<Int, java.util.Timer>()
+        val timerId = java.util.concurrent.atomic.AtomicInteger(0)
+
+        // setInterval(callback, ms) → id
+        ScriptableObject.putProperty(scope, "setInterval", object : BaseFunction() {
+            override fun call(cx: Context, s: Scriptable, thisObj: Scriptable, args: Array<out Any?>): Any? {
+                if (args.size < 2) return Undefined.instance
+                val callback = args[0] as? org.mozilla.javascript.Function ?: return Undefined.instance
+                val ms = (args[1] as? Number)?.toLong() ?: Context.toString(args[1]).toLong()
+                val id = timerId.incrementAndGet()
+                val timer = java.util.Timer("setInterval-$id", true)
+                timer.schedule(object : java.util.TimerTask() {
+                    override fun run() {
+                        val threadCtx = Context.enter()
+                        try {
+                            callback.call(threadCtx, scope, scope, emptyArray())
+                        } catch (e: Exception) {
+                            println("[Vicky][script] setInterval callback error: ${e.message}")
+                        } finally {
+                            Context.exit()
+                        }
+                    }
+                }, ms, ms)
+                timers[id] = timer
+                return id
+            }
+        })
+
+        // clearInterval(id)
+        ScriptableObject.putProperty(scope, "clearInterval", object : BaseFunction() {
+            override fun call(cx: Context, s: Scriptable, thisObj: Scriptable, args: Array<out Any?>): Any? {
+                if (args.isEmpty()) return Undefined.instance
+                val id = (args[0] as? Number)?.toInt() ?: Context.toString(args[0]).toIntOrNull() ?: return Undefined.instance
+                timers.remove(id)?.cancel()
+                return Undefined.instance
+            }
+        })
+
+        // setTimeout(callback, ms) → id
+        ScriptableObject.putProperty(scope, "setTimeout", object : BaseFunction() {
+            override fun call(cx: Context, s: Scriptable, thisObj: Scriptable, args: Array<out Any?>): Any? {
+                if (args.size < 2) return Undefined.instance
+                val callback = args[0] as? org.mozilla.javascript.Function ?: return Undefined.instance
+                val ms = (args[1] as? Number)?.toLong() ?: Context.toString(args[1]).toLong()
+                val id = timerId.incrementAndGet()
+                val timer = java.util.Timer("setTimeout-$id", true)
+                timer.schedule(object : java.util.TimerTask() {
+                    override fun run() {
+                        val threadCtx = Context.enter()
+                        try {
+                            callback.call(threadCtx, scope, scope, emptyArray())
+                        } catch (e: Exception) {
+                            println("[Vicky][script] setTimeout callback error: ${e.message}")
+                        } finally {
+                            Context.exit()
+                            timers.remove(id)
+                        }
+                    }
+                }, ms)
+                timers[id] = timer
+                return id
+            }
+        })
+
+        // clearTimeout(id)
+        ScriptableObject.putProperty(scope, "clearTimeout", object : BaseFunction() {
+            override fun call(cx: Context, s: Scriptable, thisObj: Scriptable, args: Array<out Any?>): Any? {
+                if (args.isEmpty()) return Undefined.instance
+                val id = (args[0] as? Number)?.toInt() ?: Context.toString(args[0]).toIntOrNull() ?: return Undefined.instance
+                timers.remove(id)?.cancel()
+                return Undefined.instance
+            }
+        })
+    }
+
     /**
      * 注入 coroutine 对象到脚本 scope，提供真协程支持。
      * - coroutine.launch(callback) — 启动后台协程，callback 内可调用 this.delay(ms)
@@ -447,6 +541,9 @@ class ScriptEngine {
         s.replace("\\", "\\\\").replace("`", "\\`").replace("\$", "\\\$")
 
     companion object {
+        /** TypeScript 编译线程栈大小（默认 1MB 栈不够 tsc 的深度递归） */
+        private const val COMPILER_STACK_SIZE = 8 * 1024 * 1024L // 8MB
+
         /** 精简版 Promise polyfill，供 Rhino 执行 TS 编译产物中的 async 代码 */
         private const val PROMISE_POLYFILL = """
 if (typeof Promise === 'undefined') {

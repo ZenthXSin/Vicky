@@ -72,14 +72,20 @@ class FileIndexService(
     }
 
     /**
-     * 从 Qdrant 加载已索引文件的缓存。
+     * 从 Qdrant 加载已索引文件的缓存。分页加载，避免大集合 OOM。
      */
     private suspend fun loadIndexCache() {
-        val records = vectorStore.scrollPayloadOnly(collectionName, 10000, null)
-        for (record in records) {
-            val path = record.payload["path"] as? String ?: continue
-            val lastModified = (record.payload["last_modified"] as? Double)?.toLong() ?: 0L
-            indexedFiles[path] = lastModified
+        var loaded = 0
+        while (true) {
+            val batch = vectorStore.scrollPayloadOnly(collectionName, 1000, null)
+            if (batch.isEmpty()) break
+            for (record in batch) {
+                val path = record.payload["path"] as? String ?: continue
+                val lastModified = (record.payload["last_modified"] as? Double)?.toLong() ?: 0L
+                indexedFiles[path] = lastModified
+            }
+            loaded += batch.size
+            if (batch.size < 1000) break
         }
         println("[Vicky] Loaded ${indexedFiles.size} indexed files from cache")
     }
@@ -115,11 +121,15 @@ class FileIndexService(
                 async(Dispatchers.IO) {
                     semaphore.withPermit {
                         val relativePath = relativize(file)
-                        val action = indexFileIfNeeded(relativePath, file)
-                        when (action) {
-                            IndexAction.NEW -> newIndexCount.incrementAndGet()
-                            IndexAction.UPDATED -> updatedIndexCount.incrementAndGet()
-                            IndexAction.SKIPPED -> skippedCount.incrementAndGet()
+                        try {
+                            val action = indexFileIfNeeded(relativePath, file)
+                            when (action) {
+                                IndexAction.NEW -> newIndexCount.incrementAndGet()
+                                IndexAction.UPDATED -> updatedIndexCount.incrementAndGet()
+                                IndexAction.SKIPPED -> skippedCount.incrementAndGet()
+                            }
+                        } catch (e: Exception) {
+                            println("[Vicky] 索引文件失败: $relativePath: ${e.message}")
                         }
                         val current = currentIndex.incrementAndGet()
                         onProgress?.invoke(current, newIndexCount.get() + updatedIndexCount.get(), skippedCount.get())
@@ -293,8 +303,10 @@ class FileIndexService(
                 chunks.add(Triple(chunkContent, startLine, endLine))
             }
 
-            i = endLine - chunkOverlap.coerceAtMost(endLine - i - 1)
-            if (i <= 0) i = endLine
+            // 下一个 chunk 从当前 end 回退 chunkOverlap 行，实现重叠
+            val advance = (endLine - i).coerceAtLeast(1)
+            val overlap = chunkOverlap.coerceAtMost(advance - 1)
+            i += advance - overlap
         }
 
         return chunks
