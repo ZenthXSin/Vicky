@@ -117,9 +117,7 @@ class ScriptEngine {
             val onUnloadFn = ScriptableObject.getProperty(result, "onUnload")
                 .takeIf { it != null && it != Undefined.instance }
 
-            if (executeFn == null && onLoadFn == null) {
-                throw ScriptException("Script must export at least 'execute' or 'onLoad': $fileName")
-            }
+            // execute 和 onLoad 都是可选的，脚本可以只跑顶层代码
 
             return ScriptExports(
                 name = name,

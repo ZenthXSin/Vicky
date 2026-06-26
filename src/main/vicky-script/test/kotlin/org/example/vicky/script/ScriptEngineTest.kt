@@ -409,19 +409,18 @@ class ScriptEngineTest {
     }
 
     @Test
-    fun `ScriptEngine rejects script with neither execute nor onLoad`() {
+    fun `ScriptEngine allows script with neither execute nor onLoad`() {
         val engine = ScriptEngine()
         val jsSource = """
-            var name = "bad_script";
-            var description = "no hooks";
+            var name = "top_level_only";
+            var description = "no hooks, just runs top-level code";
+            // 顶层代码会在执行时跑完
         """.trimIndent()
 
-        try {
-            engine.executeScript(jsSource, "bad.js")
-            throw AssertionError("Should have thrown ScriptException")
-        } catch (e: ScriptException) {
-            assertTrue(e.message!!.contains("at least 'execute' or 'onLoad'"))
-        }
+        val exports = engine.executeScript(jsSource, "top_level_only.js")
+        assertEquals("top_level_only", exports.name)
+        assertNull(exports.executeFn)
+        assertNull(exports.onLoadFn)
     }
 
     @Test
