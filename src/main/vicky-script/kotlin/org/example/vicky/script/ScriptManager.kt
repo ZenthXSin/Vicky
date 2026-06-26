@@ -1,5 +1,6 @@
 package org.example.vicky.script
 
+import org.mozilla.javascript.Context
 import org.mozilla.javascript.Function
 import org.example.vicky.tool.Tool
 import org.example.vicky.tool.ToolRegistry
@@ -113,6 +114,12 @@ object ScriptManager {
     /** 获取所有已加载的脚本。 */
     fun loadedScripts(): Map<String, ScriptToolBridge> = loadedScripts.toMap()
 
+    /** 打印当前脚本统计日志。 */
+    fun logStats() {
+        val total = loadedScripts.size
+        println("[Vicky][script] 加载完成: $total 个脚本已加载")
+    }
+
     /** 按文件名查找已加载的脚本。 */
     fun get(fileName: String): ScriptToolBridge? = loadedScripts[fileName]
 
@@ -132,11 +139,16 @@ object ScriptManager {
     private fun callOnLoadSafely(exports: ScriptExports, fileName: String): Boolean {
         val fn = exports.onLoadFn as? Function ?: return true
         val scope = exports.rhinoScope ?: return true
-        val ctx = exports.rhinoContext ?: return true
 
         return try {
             val future = timeoutExecutor.submit {
-                fn.call(ctx, scope, scope, emptyArray())
+                // Rhino Context 是 ThreadLocal，executor 线程必须 enter 自己的 Context
+                val threadCtx = Context.enter()
+                try {
+                    fn.call(threadCtx, scope, scope, emptyArray())
+                } finally {
+                    Context.exit()
+                }
             }
             future.get(ONLOAD_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             true
@@ -155,10 +167,14 @@ object ScriptManager {
     private fun callOnUnloadSafely(exports: ScriptExports, fileName: String) {
         val fn = exports.onUnloadFn as? Function ?: return
         val scope = exports.rhinoScope ?: return
-        val ctx = exports.rhinoContext ?: return
 
         try {
-            fn.call(ctx, scope, scope, emptyArray())
+            val ctx = Context.enter()
+            try {
+                fn.call(ctx, scope, scope, emptyArray())
+            } finally {
+                Context.exit()
+            }
         } catch (e: Exception) {
             println("[Vicky][script] onUnload 异常 (已忽略): $fileName: ${e.message}")
         }

@@ -117,6 +117,7 @@ class ManageScriptsTool(
         if (!file.exists()) return ToolResult(toAgent = "error: file '$name' not found in ${scriptsDir.absolutePath}")
         return try {
             val bridge = ScriptManager.loadAndRegister(file, registry)
+            ScriptManager.logStats()
             ToolResult(toAgent = "Loaded '${bridge.name}' from $name.", userReply = "已加载脚本: ${bridge.name}")
         } catch (e: ScriptException) {
             ToolResult(toAgent = "[script error] $name: ${e.message}")
@@ -131,6 +132,7 @@ class ManageScriptsTool(
         val name = resolveFileName(rawName)
         if (ScriptManager.get(name) == null) return ToolResult(toAgent = "error: script '$name' is not loaded")
         ScriptManager.unloadScript(name, registry)
+        ScriptManager.logStats()
         return ToolResult(toAgent = "Unloaded script '$name'.", userReply = "已卸载脚本: $name")
     }
 
@@ -143,6 +145,7 @@ class ManageScriptsTool(
         return try {
             ScriptManager.reloadScript(file, registry)
             val bridge = ScriptManager.get(name)
+            ScriptManager.logStats()
             ToolResult(toAgent = "Reloaded '${bridge?.name ?: name}'.", userReply = "已重载脚本: ${bridge?.name ?: name}")
         } catch (e: ScriptException) {
             ToolResult(toAgent = "[script error] reloading '$name': ${e.message}")
@@ -168,6 +171,7 @@ class ManageScriptsTool(
                 sb.appendLine("  [fail] ${file.name}: ${e.message}")
             }
         }
+        ScriptManager.logStats()
         return ToolResult(
             toAgent = "Loaded $loaded / ${tsFiles.size} scripts ($failed failed):\n${sb.toString().trimEnd()}",
             userReply = "已加载 $loaded 个脚本。",
