@@ -1,5 +1,9 @@
 package org.example.vicky.script
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import org.mozilla.javascript.Context
 import org.mozilla.javascript.ScriptableObject
 import java.io.File
@@ -28,4 +32,6 @@ data class ScriptExports(
     val rhinoContext: Context? = null,
     @Volatile var loaded: Boolean = false,
     @Volatile var loading: Boolean = false,
+    /** 脚本级别的协程作用域，卸载时自动取消所有子协程。 */
+    val coroutineScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 )

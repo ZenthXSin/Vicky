@@ -1,5 +1,11 @@
 package org.example.vicky.script
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -69,6 +75,10 @@ class ScriptEngine {
             // 注入 Promise polyfill（Rhino 原生不支持 Promise，TS async 编译产物需要它）
             ctx.evaluateString(scope, PROMISE_POLYFILL, "promise-polyfill", 1, null)
 
+            // 注入 coroutine 对象（launch/delay 真协程支持）
+            val scriptScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            injectCoroutine(ctx, scope, scriptScope)
+
             ctx.evaluateString(
                 scope,
                 """
@@ -121,6 +131,7 @@ class ScriptEngine {
                 fileName = fileName,
                 rhinoScope = scope,
                 rhinoContext = ctx,
+                coroutineScope = scriptScope,
             )
         } catch (e: ScriptException) {
             Context.exit()
@@ -310,6 +321,66 @@ class ScriptEngine {
         } catch (e: Exception) {
             mapOf("toAgent" to "Error: ${e.message}", "error" to true)
         }
+    }
+
+    /**
+     * 注入 coroutine 对象到脚本 scope，提供真协程支持。
+     * - coroutine.launch(callback) — 启动后台协程，callback 内可调用 this.delay(ms)
+     * - callback 内 this.delay(ms) — 非阻塞延迟
+     * - callback 内 this.launch(fn) — 嵌套启动子协程
+     */
+    private fun injectCoroutine(ctx: Context, scope: ScriptableObject, scriptScope: kotlinx.coroutines.CoroutineScope) {
+        val coroutineObj = ctx.newObject(scope)
+
+        // coroutine.launch(callback) — 启动后台协程
+        ScriptableObject.putProperty(coroutineObj, "launch", object : BaseFunction() {
+            override fun call(cx: Context, s: Scriptable, thisObj: Scriptable, args: Array<out Any?>): Any? {
+                if (args.isEmpty() || args[0] !is org.mozilla.javascript.Function) {
+                    return "error: launch requires a callback function"
+                }
+                val callback = args[0] as org.mozilla.javascript.Function
+                scriptScope.launch(Dispatchers.Default) {
+                    // 为本次协程创建 scope 对象，绑定 delay/launch
+                    val threadCtx = Context.enter()
+                    try {
+                        val coScope = threadCtx.newObject(scope)
+                        ScriptableObject.putProperty(coScope, "delay", object : BaseFunction() {
+                            override fun call(cx: Context, sc: Scriptable, tObj: Scriptable, dArgs: Array<out Any?>): Any? {
+                                if (dArgs.isEmpty()) return "error: delay(ms) requires 1 arg"
+                                val ms = (dArgs[0] as? Number)?.toLong() ?: Context.toString(dArgs[0]).toLong()
+                                runBlocking { delay(ms) }
+                                return "delayed ${ms}ms"
+                            }
+                        })
+                        ScriptableObject.putProperty(coScope, "launch", object : BaseFunction() {
+                            override fun call(cx: Context, sc: Scriptable, tObj: Scriptable, lArgs: Array<out Any?>): Any? {
+                                if (lArgs.isEmpty() || lArgs[0] !is org.mozilla.javascript.Function) return "error: launch requires callback"
+                                val sub = lArgs[0] as org.mozilla.javascript.Function
+                                scriptScope.launch(Dispatchers.Default) {
+                                    val subCtx = Context.enter()
+                                    try {
+                                        sub.call(subCtx, scope, coScope, emptyArray())
+                                    } catch (e: Exception) {
+                                        println("[Vicky][script] coroutine error: ${e.message}")
+                                    } finally {
+                                        Context.exit()
+                                    }
+                                }
+                                return "launched"
+                            }
+                        })
+                        callback.call(threadCtx, scope, coScope, emptyArray())
+                    } catch (e: Exception) {
+                        println("[Vicky][script] coroutine error: ${e.message}")
+                    } finally {
+                        Context.exit()
+                    }
+                }
+                return "launched"
+            }
+        })
+
+        ScriptableObject.putProperty(scope, "coroutine", coroutineObj)
     }
 
     fun releaseExports(exports: ScriptExports) {

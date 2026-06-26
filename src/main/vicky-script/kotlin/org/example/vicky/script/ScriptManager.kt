@@ -1,6 +1,7 @@
 package org.example.vicky.script
 
 import org.mozilla.javascript.Context
+import kotlinx.coroutines.cancel
 import org.mozilla.javascript.Function
 import org.example.vicky.tool.Tool
 import org.example.vicky.tool.ToolRegistry
@@ -88,6 +89,8 @@ object ScriptManager {
             // 调用 onUnload（安全容错）
             exportsMap.remove(fileName)?.let { exports ->
                 callOnUnloadSafely(exports, fileName)
+                // 取消脚本的协程作用域，终止所有后台协程
+                exports.coroutineScope.cancel()
             }
             bridge.release()
         }

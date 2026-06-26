@@ -207,11 +207,21 @@ HTTP 请求需要通过 Java 的 `HttpURLConnection` 实现（见下方示例）
 
 ### 5. TypeScript 限制
 - 编译目标默认 ES5，模块 ES2015
-- `async/await` 可用（有内置 Promise polyfill）
+- `async/await` 可用（有内置 Promise polyfill，同步执行）
 - 类型注解仅用于编译期检查，运行时不存在
 - 不支持 `interface` 导出（会被忽略）
 
-### 6. 参数类型
+### 6. 协程支持
+脚本自动注入 `coroutine` 对象，提供真异步能力：
+- `coroutine.launch(callback)` — 启动后台协程，callback 接收 `co` 参数
+- `co.delay(ms)` — 非阻塞延迟
+- `co.launch(fn)` — 嵌套子协程
+- 脚本卸载时自动取消所有协程
+- 协程运行在 Kotlin `Dispatchers.Default` 线程池
+
+> 注意：`async/await` 是同步的，`coroutine.launch` 才是真异步。
+
+### 7. 参数类型
 `args` 中的参数值由 JSON 传入，类型自动转换：
 - JSON string → JS string
 - JSON number → JS int 或 double
@@ -662,6 +672,68 @@ function onUnload() {
 
 > 纯插件模式不需要 `execute`。`onLoad` 中做初始化，`onUnload` 中清理。
 > 但注意：脚本环境没有事件系统，主动发消息只能通过 `execute()` 中的 `ctx` 或 `MiraiToolImpl.bot`。
+
+### 示例 17：协程 — coroutine.launch + delay
+
+```typescript
+var name: string = "delayed_msg";
+var description: string = "延迟发送群消息";
+var parameters = {
+    type: "object",
+    properties: {
+        groupId: { type: "string", description: "群号" },
+        text: { type: "string", description: "消息内容" },
+        delaySec: { type: "integer", description: "延迟秒数" }
+    },
+    required: ["groupId", "text", "delaySec"]
+};
+
+async function execute(ctx: any, args: any): Promise<any> {
+    // coroutine.launch 启动后台协程，不阻塞 execute 返回
+    coroutine.launch(function(co) {
+        // co.delay(ms) 非阻塞延迟，脚本卸载时自动取消
+        co.delay(args.delaySec * 1000);
+        ctx.sendGroupMessage(args.groupId, args.text);
+    });
+
+    return {
+        toAgent: "scheduled message in " + args.delaySec + "s",
+        userReply: "将在 " + args.delaySec + " 秒后发送消息"
+    };
+}
+```
+
+> **`coroutine.launch(callback)`** — 启动后台协程，callback 接收 `co` 参数：
+> - `co.delay(ms)` — 非阻塞延迟，脚本卸载时自动取消
+> - `co.launch(fn)` — 嵌套启动子协程
+>
+> 协程运行在 Kotlin `Dispatchers.Default` 线程池，脚本卸载时自动取消所有协程。
+
+### 示例 18：多个定时任务 + 协程
+
+```typescript
+var name: string = "multi_task";
+var description: string = "多个后台定时任务";
+var parameters = { type: "object", properties: {} };
+
+async function execute(ctx: any, args: any): Promise<any> {
+    // 任务 1：每 30 秒检查一次
+    coroutine.launch(function(co) {
+        while (true) {
+            co.delay(30000);
+            java.lang.System.out.println("[task1] heartbeat");
+        }
+    });
+
+    // 任务 2：延迟 5 秒后执行一次
+    coroutine.launch(function(co) {
+        co.delay(5000);
+        java.lang.System.out.println("[task2] one-shot done");
+    });
+
+    return { toAgent: "2 background tasks started" };
+}
+```
 
 ---
 

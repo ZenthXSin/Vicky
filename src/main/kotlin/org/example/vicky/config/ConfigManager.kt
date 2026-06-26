@@ -151,6 +151,14 @@ object ConfigManager {
             getDefaultAgentMd()
         }
 
+        // 检查关键配置是否已填写
+        if (configData.apiKey.isBlank()) {
+            println("[Vicky] 警告: apiKey 未配置，请编辑 config.json 填写 API Key")
+        }
+        if (configData.oneBot.token.isBlank()) {
+            println("[Vicky] 警告: oneBot.token 未配置，请编辑 config.json 填写 OneBot Token")
+        }
+
         return LoadResult(configData, agentMdContent, firstRun = false)
     }
 
@@ -234,8 +242,8 @@ object ConfigManager {
 
         val configData = ConfigData(
             model = "deepseek-v4-flash",
-            apiKey = "sk-Nhxs7MO3HDspptIICNmgobNdmeSc4RcIM6Aa4FLxvqgxeM6S",
-            baseUrl = "http://192.168.0.108:3000/v1/",
+            apiKey = "",
+            baseUrl = "",
             maxSteps = 15,
             maxMemoryRounds = 10,
             maxContextLength = 16000,
@@ -247,7 +255,7 @@ object ConfigManager {
             builtinTools = false,
             oneBot = OneBotConfigData(
                 url = "ws://127.0.0.1:3001",
-                token = "NojbBpwpI3OgBG3z",
+                token = "",
                 adminList = listOf("488254306"),
             ),
         )
@@ -265,7 +273,9 @@ object ConfigManager {
         val stream = ConfigManager::class.java.classLoader?.getResourceAsStream(resourcePath) ?: return
         val resourceBytes = stream.use { it.readBytes() }
         if (target.exists() && target.readBytes().contentEquals(resourceBytes)) return
+        val action = if (target.exists()) "更新" else "写入"
         target.writeBytes(resourceBytes)
+        println("[Vicky][config] 资源${action}: ${target.name} (${resourceBytes.size} bytes)")
     }
 
     fun toAgentConfig(configData: ConfigData, agentMdContent: String): AgentConfig {
