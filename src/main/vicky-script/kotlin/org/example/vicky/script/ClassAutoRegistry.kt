@@ -149,6 +149,8 @@ object ClassAutoRegistry {
     // ─── 注入 ────────────────────────────────────────────────
 
     private fun injectClass(ctx: Context, scope: ScriptableObject, name: String, cls: Class<*>) {
+        // 跳过非 public 类和内部类（如 kotlinx.serialization 的 Tombstone、JsonLiteralSerializer 等）
+        if (!Modifier.isPublic(cls.modifiers) || cls.isSynthetic || cls.isAnonymousClass) return
         try {
             // 检测 Kotlin object 单例（INSTANCE 字段）
             val instanceField = cls.declaredFields.firstOrNull {
@@ -173,9 +175,16 @@ object ClassAutoRegistry {
                 ScriptableObject.putProperty(scope, name, proxy)
             }
         } catch (e: Exception) {
-            println("[Vicky][script] 注入类 $name 失败: ${e.message}")
+            // 只在首次注入失败时打印，避免每个脚本加载都重复
+            if (name !in injectFailedNames) {
+                injectFailedNames.add(name)
+                println("[Vicky][script] 注入类 $name 失败: ${e.message}")
+            }
         }
     }
+
+    /** 记录注入失败的类名，避免重复日志。 */
+    private val injectFailedNames = mutableSetOf<String>()
 
     /**
      * 创建一个可调用的 JS 函数，作为 Java 类的构造器代理。
@@ -246,13 +255,43 @@ object ClassAutoRegistry {
             val resources = classLoader.getResources(path)
             while (resources.hasMoreElements()) {
                 val resource = resources.nextElement()
-                val resourcePath = resource.path
-                if (resourcePath.startsWith("file:")) {
-                    val file = File(URLDecoder.decode(resourcePath.removePrefix("file:"), "UTF-8"))
-                    if (file.isDirectory) scanDirectory(file, packageName)
+                val protocol = resource.protocol
+                when (protocol) {
+                    "file" -> {
+                        val file = File(URLDecoder.decode(resource.path, "UTF-8"))
+                        if (file.isDirectory) scanDirectory(file, packageName)
+                    }
+                    "jar" -> {
+                        scanJar(packageName, resource.toString())
+                    }
                 }
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            println("[Vicky][script] scanPackage($packageName) 失败: ${e.message}")
+        }
+    }
+
+    /** 从 JAR 扫描指定包下的类。 */
+    private fun scanJar(packageName: String, jarUrl: String) {
+        val prefix = packageName.replace('.', '/') + "/"
+        val jarPath = jarUrl.removePrefix("jar:file:").substringBefore("!")
+        val jarFile = try {
+            java.util.jar.JarFile(URLDecoder.decode(jarPath, "UTF-8"))
+        } catch (_: Exception) { return }
+
+        for (entry in jarFile.entries()) {
+            if (!entry.isDirectory && entry.name.startsWith(prefix) && entry.name.endsWith(".class")) {
+                val className = entry.name.removeSuffix(".class").replace('/', '.')
+                try {
+                    val cls = Class.forName(className)
+                    if (shouldRegister(cls)) {
+                        classMap.putIfAbsent(cls.simpleName, cls)
+                        collectMeta(cls)
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+        jarFile.close()
     }
 
     private fun scanDirectory(directory: File, packageName: String) {
@@ -264,11 +303,10 @@ object ClassAutoRegistry {
                 val className = "$packageName.${file.name.removeSuffix(".class")}"
                 try {
                     val cls = Class.forName(className)
-                    if (cls.simpleName.isNotEmpty() && !cls.isAnonymousClass && !cls.isLocalClass) {
+                    if (shouldRegister(cls)) {
                         val existing = classMap[cls.simpleName]
                         if (existing == null || cls.packageName.startsWith("org.example.vicky")) {
                             classMap[cls.simpleName] = cls
-                            // 收集元数据
                             collectMeta(cls)
                         }
                     }
@@ -276,6 +314,14 @@ object ClassAutoRegistry {
             }
         }
     }
+
+    /** 判断类是否应该注册：public、非合成、非匿名、非本地。 */
+    private fun shouldRegister(cls: Class<*>): Boolean =
+        cls.simpleName.isNotEmpty() &&
+            Modifier.isPublic(cls.modifiers) &&
+            !cls.isSynthetic &&
+            !cls.isAnonymousClass &&
+            !cls.isLocalClass
 
     // ─── 元数据收集 ──────────────────────────────────────────
 
