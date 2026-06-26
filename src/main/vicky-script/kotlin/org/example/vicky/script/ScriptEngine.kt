@@ -100,7 +100,7 @@ class ScriptEngine {
             val result = ScriptableObject.getProperty(scope, "__script_result") as ScriptableObject
             val name = Context.toString(ScriptableObject.getProperty(result, "name"))
                 .takeIf { it != "null" && it != "undefined" }
-                ?: throw ScriptException("Script must export 'name': $fileName")
+                ?: fileName.removeSuffix(".ts") // 兜底：用文件名作为工具名
             val description = Context.toString(ScriptableObject.getProperty(result, "description"))
                 .takeIf { it != "null" && it != "undefined" } ?: ""
 
