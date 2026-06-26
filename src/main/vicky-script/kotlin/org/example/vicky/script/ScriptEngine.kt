@@ -150,83 +150,145 @@ class ScriptEngine {
     ): Map<String, Any?> {
         val fn = exports.executeFn as Function
         val scope = exports.rhinoScope ?: throw ScriptException("Script scope not available")
-        val ctx = exports.rhinoContext ?: throw ScriptException("Script context not available")
-
-        // 构建 JS args 对象
-        val jsArgs = ctx.newObject(scope)
-        for ((key, value) in args) {
-            when (value) {
-                is JsonPrimitive -> {
-                    if (value.isString) {
-                        ScriptableObject.putProperty(jsArgs, key, value.content)
-                    } else {
-                        val intVal = value.content.toIntOrNull()
-                        val doubleVal = value.content.toDoubleOrNull()
-                        val boolVal = value.content.toBooleanStrictOrNull()
-                        when {
-                            intVal != null -> ScriptableObject.putProperty(jsArgs, key, intVal)
-                            doubleVal != null -> ScriptableObject.putProperty(jsArgs, key, doubleVal)
-                            boolVal != null -> ScriptableObject.putProperty(jsArgs, key, boolVal)
-                            else -> ScriptableObject.putProperty(jsArgs, key, value.content)
-                        }
-                    }
-                }
-                else -> ScriptableObject.putProperty(jsArgs, key, value.toString())
-            }
-        }
-
-        // 构建 ctx 对象
-        val jsCtx = ctx.newObject(scope)
-        ScriptableObject.putProperty(jsCtx, "userId", toolCtx.userId)
-        ScriptableObject.putProperty(jsCtx, "conversationId", toolCtx.conversationId)
-        ScriptableObject.putProperty(jsCtx, "groupId", toolCtx.groupId)
-
-        // 注入 sendMessage(groupId, text) — 通过 MiraiToolImpl.bot 发送群消息
-        val sendMsgFn = object : BaseFunction() {
-            override fun call(cx: Context, s: Scriptable, thisObj: Scriptable, args: Array<out Any?>): Any? {
-                if (args.size < 2) return "error: sendMessage requires (groupId, text)"
-                val groupIdStr = Context.toString(args[0])
-                val text = Context.toString(args[1])
-                return try {
-                    val miraiClass = Class.forName("org.example.vicky.channel.onebot.MiraiToolImpl")
-                    val instanceField = miraiClass.getDeclaredField("INSTANCE")
-                    val instance = instanceField.get(null)
-                    val bot = miraiClass.getMethod("getBot").invoke(instance)
-                    if (bot == null) {
-                        "error: Bot 未连接"
-                    } else {
-                        val botClass = bot.javaClass
-                        val getGroup = botClass.getMethod("getGroup", Long::class.javaPrimitiveType)
-                        val group = getGroup.invoke(bot, groupIdStr.toLong())
-                        if (group == null) {
-                            "error: 群不存在: $groupIdStr"
+        // Rhino Context 是 ThreadLocal，callExecute 可能在不同线程调用，
+        // 必须在当前线程 enter/exit 自己的 Context。
+        val ctx = Context.enter()
+        try {
+            // 构建 JS args 对象
+            val jsArgs = ctx.newObject(scope)
+            for ((key, value) in args) {
+                when (value) {
+                    is JsonPrimitive -> {
+                        if (value.isString) {
+                            ScriptableObject.putProperty(jsArgs, key, value.content)
                         } else {
-                            group.javaClass.getMethod("sendMessage", String::class.java).invoke(group, text)
-                            "sent to group $groupIdStr"
+                            val intVal = value.content.toIntOrNull()
+                            val doubleVal = value.content.toDoubleOrNull()
+                            val boolVal = value.content.toBooleanStrictOrNull()
+                            when {
+                                intVal != null -> ScriptableObject.putProperty(jsArgs, key, intVal)
+                                doubleVal != null -> ScriptableObject.putProperty(jsArgs, key, doubleVal)
+                                boolVal != null -> ScriptableObject.putProperty(jsArgs, key, boolVal)
+                                else -> ScriptableObject.putProperty(jsArgs, key, value.content)
+                            }
                         }
                     }
-                } catch (e: Exception) {
-                    "error: ${e.message}"
+                    else -> ScriptableObject.putProperty(jsArgs, key, value.toString())
                 }
             }
-        }
-        ScriptableObject.putProperty(jsCtx, "sendMessage", sendMsgFn)
 
-        var result = fn.call(ctx, scope, scope, arrayOf(jsCtx, jsArgs))
+            // 构建 ctx 对象
+            val jsCtx = ctx.newObject(scope)
+            ScriptableObject.putProperty(jsCtx, "userId", toolCtx.userId)
+            ScriptableObject.putProperty(jsCtx, "conversationId", toolCtx.conversationId)
+            ScriptableObject.putProperty(jsCtx, "groupId", toolCtx.groupId)
 
-        // 解包 Promise：TS async 编译产物返回 Promise，polyfill 同步解析，通过 then 提取值
-        result = unwrapPromise(ctx, scope, result)
-
-        if (result is ScriptableObject) {
-            val map = mutableMapOf<String, Any?>()
-            for (id in result.ids) {
-                val key = Context.toString(id)
-                val value = ScriptableObject.getProperty(result, key)
-                map[key] = if (value == Undefined.instance) null else value
+            // 辅助：获取 Mirai Bot 实例
+            fun getMiraiBot(): Any? {
+                val miraiClass = Class.forName("org.example.vicky.channel.onebot.MiraiToolImpl")
+                val instance = miraiClass.getDeclaredField("INSTANCE").get(null)
+                return miraiClass.getMethod("getBot").invoke(instance)
             }
-            return map
+
+            // ctx.sendGroupMessage(groupId, text) — 发送群消息
+            val sendGroupFn = object : BaseFunction() {
+                override fun call(cx: Context, s: Scriptable, thisObj: Scriptable, args: Array<out Any?>): Any? {
+                    if (args.size < 2) return "error: sendGroupMessage(groupId, text) requires 2 args"
+                    return try {
+                        val bot = getMiraiBot() ?: return "error: Bot 未连接"
+                        val group = bot.javaClass.getMethod("getGroup", Long::class.javaPrimitiveType)
+                            .invoke(bot, Context.toString(args[0]).toLong())
+                        if (group == null) "error: 群不存在: ${args[0]}"
+                        else {
+                            group.javaClass.getMethod("sendMessage", String::class.java).invoke(group, Context.toString(args[1]))
+                            "ok"
+                        }
+                    } catch (e: Exception) { "error: ${e.message}" }
+                }
+            }
+            ScriptableObject.putProperty(jsCtx, "sendGroupMessage", sendGroupFn)
+
+            // ctx.sendMessage(targetId, text) — 发送私聊消息（好友/陌生人）
+            val sendPrivateFn = object : BaseFunction() {
+                override fun call(cx: Context, s: Scriptable, thisObj: Scriptable, args: Array<out Any?>): Any? {
+                    if (args.size < 2) return "error: sendMessage(targetId, text) requires 2 args"
+                    return try {
+                        val bot = getMiraiBot() ?: return "error: Bot 未连接"
+                        val targetId = Context.toString(args[0]).toLong()
+                        val text = Context.toString(args[1])
+                        // 尝试 getFriend，失败则 getStranger
+                        var contact = try {
+                            bot.javaClass.getMethod("getFriend", Long::class.javaPrimitiveType).invoke(bot, targetId)
+                        } catch (_: Exception) { null }
+                        if (contact == null) {
+                            contact = try {
+                                bot.javaClass.getMethod("getStranger", Long::class.javaPrimitiveType).invoke(bot, targetId)
+                            } catch (_: Exception) { null }
+                        }
+                        if (contact == null) "error: 无法找到联系人: $targetId"
+                        else {
+                            contact.javaClass.getMethod("sendMessage", String::class.java).invoke(contact, text)
+                            "ok"
+                        }
+                    } catch (e: Exception) { "error: ${e.message}" }
+                }
+            }
+            ScriptableObject.putProperty(jsCtx, "sendMessage", sendPrivateFn)
+
+            // ctx.setTimer(intervalMs, callback) — 创建定时器，返回 timer 对象
+            val setTimerFn = object : BaseFunction() {
+                override fun call(cx: Context, s: Scriptable, thisObj: Scriptable, args: Array<out Any?>): Any? {
+                    if (args.size < 2) return "error: setTimer(intervalMs, callback) requires 2 args"
+                    val intervalMs = (args[0] as? Number)?.toLong() ?: Context.toString(args[0]).toLong()
+                    val callback = args[1] as? org.mozilla.javascript.Function ?: return "error: callback must be a function"
+
+                    val timer = java.util.Timer("script-timer-${System.currentTimeMillis()}", true)
+                    val task = object : java.util.TimerTask() {
+                        override fun run() {
+                            val threadCtx = Context.enter()
+                            try {
+                                callback.call(threadCtx, scope, scope, emptyArray())
+                            } catch (e: Exception) {
+                                println("[Vicky][script] timer callback error: ${e.message}")
+                            } finally {
+                                Context.exit()
+                            }
+                        }
+                    }
+                    timer.schedule(task, intervalMs, intervalMs)
+
+                    // 返回一个可控制的 timer 对象
+                    val timerObj = ctx.newObject(scope)
+                    ScriptableObject.putProperty(timerObj, "cancel", object : BaseFunction() {
+                        override fun call(cx: Context, s: Scriptable, thisObj: Scriptable, args: Array<out Any?>): Any? {
+                            timer.cancel()
+                            return "cancelled"
+                        }
+                    })
+                    ScriptableObject.putProperty(timerObj, "interval", intervalMs)
+                    return timerObj
+                }
+            }
+            ScriptableObject.putProperty(jsCtx, "setTimer", setTimerFn)
+
+            var result = fn.call(ctx, scope, scope, arrayOf(jsCtx, jsArgs))
+
+            // 解包 Promise：TS async 编译产物返回 Promise，polyfill 同步解析，通过 then 提取值
+            result = unwrapPromise(ctx, scope, result)
+
+            if (result is ScriptableObject) {
+                val map = mutableMapOf<String, Any?>()
+                for (id in result.ids) {
+                    val key = Context.toString(id)
+                    val value = ScriptableObject.getProperty(result, key)
+                    map[key] = if (value == Undefined.instance) null else value
+                }
+                return map
+            }
+            return mapOf("toAgent" to Context.toString(result))
+        } finally {
+            Context.exit()
         }
-        return mapOf("toAgent" to Context.toString(result))
     }
 
     /**
@@ -251,7 +313,11 @@ class ScriptEngine {
     }
 
     fun releaseExports(exports: ScriptExports) {
-        // Rhino 不需要显式释放
+        // 释放 executeScript 中 enter 的 Rhino Context（ThreadLocal），
+        // 避免长期运行时泄漏。callExecute 使用自己的 Context，不受影响。
+        exports.rhinoContext?.let {
+            try { Context.exit() } catch (_: Exception) {}
+        }
     }
 
     private fun loadTypeScriptCompiler(): String {

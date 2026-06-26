@@ -44,11 +44,19 @@ var parameters = {
 
 // 4. execute — 执行函数（必须，async function）
 async function execute(ctx: any, args: any): Promise<any> {
-    // args.param1  — 用户传入的参数
-    // ctx.userId   — 调用者 ID
+    // ── ctx 只读属性 ──
+    // ctx.userId         — 调用者 ID
     // ctx.conversationId — 会话 ID
-    // ctx.groupId  — 群聊 ID（如果有）
-    // ctx.sendMessage(groupId, text) — 主动发送群消息（见示例 12）
+    // ctx.groupId        — 群聊 ID（私聊时为空）
+
+    // ── ctx 主动发消息 ──
+    // ctx.sendGroupMessage(groupId, text) — 发送群消息
+    // ctx.sendMessage(targetId, text)     — 发送私聊消息（好友/陌生人）
+
+    // ── ctx 定时器 ──
+    // var timer = ctx.setTimer(intervalMs, callback) — 创建定时器
+    // timer.cancel() — 取消定时器
+    // timer.interval — 间隔毫秒数
 
     return {
         toAgent: "返回给 AI 的内容（必填）",
@@ -546,16 +554,18 @@ var parameters = {
 };
 
 async function execute(ctx: any, args: any): Promise<any> {
-    // 方式 1：用 ctx.sendMessage（推荐，简单）
-    var result = ctx.sendMessage(args.groupId, args.text);
+    // 方式 1：ctx.sendGroupMessage（推荐）
+    var result = ctx.sendGroupMessage(args.groupId, args.text);
     return { toAgent: result };
 
-    // 方式 2：直接操作 Mirai Bot（更灵活，可调用全部 Mirai API）
+    // 方式 2：直接操作 Mirai Bot（可调用全部 Mirai API）
     // var bot = MiraiToolImpl.bot;
     // var group = bot.getGroup(java.lang.Long.parseLong(args.groupId));
     // group.sendMessage(args.text);
 }
 ```
+
+> **`ctx` 方法只在 `execute()` 中可用**（由框架注入）。`onLoad()`、`onUnload()`、Timer 回调中没有 `ctx`，需要用 `MiraiToolImpl.bot` 直接操作。
 
 ### 示例 13：插件模式 — onLoad 注册事件监听
 
@@ -600,57 +610,58 @@ function onUnload() {
 }
 ```
 
-### 示例 15：定时任务 — Timer + 主动发消息
+### 示例 15：定时任务 — ctx.setTimer
 
 ```typescript
-var name: string = "scheduled_msg";
-var description: string = "定时发送群消息插件";
-var parameters = { type: "object", properties: {} };
-
-var timer: any = null;
-
-function onLoad() {
-    var Timer = Java.type("java.util.Timer");
-    var TimerTask = Java.type("java.util.TimerTask");
-
-    timer = new Timer("scheduled-msg", true); // daemon = true
-
-    var task = new (TimerTask.extend({
-        run: function() {
-            try {
-                // onLoad 回调中没有 ctx，用 MiraiToolImpl.bot 直接发消息
-                var bot = MiraiToolImpl.bot;
-                if (bot == null) return;
-                var group = bot.getGroup(java.lang.Long.parseLong("123456789"));
-                if (group != null) group.sendMessage("定时消息：系统运行正常");
-            } catch (e) {
-                java.lang.System.out.println("[scheduled] error: " + e);
-            }
-        }
-    }));
-
-    // 延迟 0ms 开始，每 60000ms（1分钟）执行一次
-    timer.schedule(task, 0, 60000);
-    java.lang.System.out.println("[scheduled] 定时任务已启动");
-}
-
-function onUnload() {
-    if (timer != null) {
-        timer.cancel();
-        java.lang.System.out.println("[scheduled] 定时任务已停止");
-    }
-}
+var name: string = "start_timer";
+var description: string = "启动定时发送群消息";
+var parameters = {
+    type: "object",
+    properties: {
+        groupId: { type: "string", description: "目标群号" },
+        intervalSec: { type: "integer", description: "间隔秒数（默认 60）" }
+    },
+    required: ["groupId"]
+};
 
 async function execute(ctx: any, args: any): Promise<any> {
-    // execute 中可以用 ctx.sendMessage（框架注入，更简洁）
-    // 也可以用 MiraiToolImpl.bot（更灵活，可调用全部 Mirai API）
-    return { toAgent: "定时任务插件运行中" };
+    var intervalMs = (args.intervalSec || 60) * 1000;
+
+    // ctx.setTimer 返回 timer 对象，可用 timer.cancel() 取消
+    var timer = ctx.setTimer(intervalMs, function() {
+        // 回调中可以直接用 ctx 发消息
+        ctx.sendGroupMessage(args.groupId, "定时消息：系统运行正常");
+    });
+
+    return {
+        toAgent: "timer started, interval=" + intervalMs + "ms",
+        userReply: "定时任务已启动，间隔 " + (intervalMs / 1000) + " 秒"
+    };
 }
 ```
 
-> **`ctx.sendMessage` vs `MiraiToolImpl.bot`**：
-> - `ctx.sendMessage(groupId, text)` — 只在 `execute()` 中可用，简单快捷
-> - `MiraiToolImpl.bot` — 任何地方都可用（包括 `onLoad`、Timer 回调），可调用全部 Mirai API
+> **`ctx` 只在 `execute()` 中可用**。`ctx.setTimer` 的回调在 execute 的上下文中执行，可以访问 `ctx`。
+> 如果用 `java.util.Timer` + `onLoad`，回调中没有 `ctx`，需要用 `MiraiToolImpl.bot`。
+
+### 示例 16：纯 onLoad 插件（无 execute）
+
+```typescript
+var name: string = "auto_greet";
+var description: string = "新成员入群自动打招呼";
+
+function onLoad() {
+    java.lang.System.out.println("[auto_greet] 插件已加载，等待新成员事件...");
+    // 注意：onLoad 中没有 ctx，需要通过 MiraiToolImpl.bot 操作
+    // 实际的事件监听需要在 Kotlin 层实现，脚本只能做初始化
+}
+
+function onUnload() {
+    java.lang.System.out.println("[auto_greet] 插件已卸载");
+}
+```
+
+> 纯插件模式不需要 `execute`。`onLoad` 中做初始化，`onUnload` 中清理。
+> 但注意：脚本环境没有事件系统，主动发消息只能通过 `execute()` 中的 `ctx` 或 `MiraiToolImpl.bot`。
 
 ---
 
