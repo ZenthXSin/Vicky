@@ -131,6 +131,17 @@ class OneBot(
 
     // region 事件监听
 
+    /** 分配消息引用 ID 并缓存 MessageSource，超限时清理最旧的缓存条目。 */
+    private fun cacheMessageRef(source: MessageSource): String {
+        val ref = "#${msgCounter.incrementAndGet()}"
+        messageSourceCache[ref] = source
+        if (messageSourceCache.size > 2000) {
+            val toRemove = messageSourceCache.keys.take(200)
+            toRemove.forEach { messageSourceCache.remove(it) }
+        }
+        return ref
+    }
+
     private fun registerListeners() {
         val b = bot ?: return
         val channel = b.eventChannel
@@ -138,12 +149,7 @@ class OneBot(
         // 监听器A: 全量消息 (群+好友) → 拆分存入缓冲区
         // HIGHEST 优先于 NORMAL，确保缓冲先于触发。
         channel.subscribeAlways<GroupMessageEvent>(priority = EventPriority.HIGHEST) {
-            val ref = "#${msgCounter.incrementAndGet()}"
-            messageSourceCache[ref] = message.source
-            if (messageSourceCache.size > 2000) {
-                val toRemove = messageSourceCache.keys.take(200)
-                toRemove.forEach { messageSourceCache.remove(it) }
-            }
+            val ref = cacheMessageRef(message.source)
             val (text, richMedia) = parseMessage(message)
             buffer.store(
                 conversationId = group.id.toString(),
@@ -158,12 +164,7 @@ class OneBot(
             )
         }
         channel.subscribeAlways<FriendMessageEvent>(priority = EventPriority.HIGHEST) {
-            val ref = "#${msgCounter.incrementAndGet()}"
-            messageSourceCache[ref] = message.source
-            if (messageSourceCache.size > 2000) {
-                val toRemove = messageSourceCache.keys.take(200)
-                toRemove.forEach { messageSourceCache.remove(it) }
-            }
+            val ref = cacheMessageRef(message.source)
             val (text, richMedia) = parseMessage(message)
             buffer.store(
                 conversationId = sender.id.toString(),
@@ -179,12 +180,7 @@ class OneBot(
         }
         // 陌生人/临时会话消息 → 存入缓冲区
         channel.subscribeAlways<StrangerMessageEvent>(priority = EventPriority.HIGHEST) {
-            val ref = "#${msgCounter.incrementAndGet()}"
-            messageSourceCache[ref] = message.source
-            if (messageSourceCache.size > 2000) {
-                val toRemove = messageSourceCache.keys.take(200)
-                toRemove.forEach { messageSourceCache.remove(it) }
-            }
+            val ref = cacheMessageRef(message.source)
             val (text, richMedia) = parseMessage(message)
             buffer.store(
                 conversationId = sender.id.toString(),
@@ -371,7 +367,13 @@ class OneBot(
             }
 
             if (vectorStore != null && embeddingClient != null) {
-                memoryStore = QdrantMemoryStore(vectorStore!!, embeddingClient, memConfig.memoryCollection, memConfig.memoryRawCollection)
+                memoryStore = QdrantMemoryStore(
+                    vectorStore!!, embeddingClient,
+                    memConfig.memoryCollection, memConfig.memoryRawCollection,
+                    memConfig.memoryRawRetentionDays.toLong(),
+                    memConfig.memoryDistilledRetentionDays.toLong(),
+                    memConfig.memoryExpiryDays.toLong(),
+                )
                 println("[Vicky] 记忆系统已启用（topK: ${memConfig.memoryTopK}, tokenBudget: ${memConfig.memoryTokenBudget}）")
 
                 if (memConfig.fileIndexEnabled) {
@@ -431,9 +433,24 @@ class OneBot(
             }
             ToolRegistry.tools("mirai").forEach { tools.register(it) }
 
-            // 脚本管理工具（用户通过 manage_scripts 工具按需加载/卸载脚本）
+            // 脚本管理工具 + 自动加载所有 .ts 脚本
             val scriptsDir = java.io.File(org.example.vicky.config.ConfigManager.getConfigDir(), "scripts")
             tools.register(org.example.vicky.tool.builtin.ManageScriptsTool(scriptsDir, tools))
+
+            // 自动加载 scripts 目录下所有 .ts 文件
+            if (scriptsDir.exists()) {
+                val tsFiles = scriptsDir.listFiles { f -> f.isFile && f.extension == "ts" }
+                if (tsFiles != null) {
+                    for (file in tsFiles) {
+                        try {
+                            org.example.vicky.script.ScriptManager.loadAndRegister(file, tools)
+                        } catch (e: Exception) {
+                            println("[Vicky][script] 自动加载失败: ${file.name}: ${e.message}")
+                        }
+                    }
+                    org.example.vicky.script.ScriptManager.logStats()
+                }
+            }
         }
 
         override suspend fun onTurnStart(msg: InboundMessage, history: MutableList<ChatMessage>) {
