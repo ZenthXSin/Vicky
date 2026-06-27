@@ -7,6 +7,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlin.coroutines.intrinsics.COROUTINE_SUSPENDED
+import kotlin.coroutines.resume
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -87,6 +89,10 @@ class ScriptEngine {
             injectPrintln(ctx, scope)
             injectTimers(ctx, scope)
             ClassAutoRegistry.injectAll(ctx, scope)
+            injectExtend(ctx, scope)
+
+            // 注入 callReceive —— 调用 Kotlin suspend fun receive(InboundMessage, ...) 的便捷包装
+            injectCallReceive(ctx, scope)
 
             // 注入 Promise polyfill（Rhino 原生不支持 Promise，TS async 编译产物需要它）
             ctx.evaluateString(scope, PROMISE_POLYFILL, "promise-polyfill", 1, null)
@@ -149,17 +155,28 @@ class ScriptEngine {
             )
         } catch (e: ScriptException) {
             Context.exit()
+            val dumpPath = dumpDebugJs(fileName, jsSource)
+            if (dumpPath != null) {
+                throw ScriptException("${e.message}\n  (compiled JS dumped to $dumpPath)", e)
+            }
             throw e
         } catch (e: EcmaError) {
             Context.exit()
             val line = if (e.lineNumber() > 0) " (line ${e.lineNumber()})" else ""
-            throw ScriptException("Runtime error in $fileName$line: ${e.name}: ${e.errorMessage}", e)
+            val ctxSnippet = snippetAround(jsSource, e.lineNumber())
+            val dumpPath = dumpDebugJs(fileName, jsSource)
+            val rhinoTrace = try { e.scriptStackTrace.takeIf { it.isNotBlank() }?.let { "\n  ---- Rhino stack ----\n$it" } ?: "" } catch (_: Exception) { "" }
+            val javaCause = e.cause?.let { "\n  ---- caused by Java exception ----\n  ${it.javaClass.name}: ${it.message}" } ?: ""
+            throw ScriptException("Runtime error in $fileName$line: ${e.name}: ${e.errorMessage}$ctxSnippet$rhinoTrace$javaCause${if (dumpPath != null) "\n  (compiled JS dumped to $dumpPath)" else ""}", e)
         } catch (e: EvaluatorException) {
             Context.exit()
             val line = if (e.lineNumber() > 0) " (line ${e.lineNumber()})" else ""
-            throw ScriptException("Evaluation error in $fileName$line: ${e.message}", e)
+            val ctxSnippet = snippetAround(jsSource, e.lineNumber())
+            val dumpPath = dumpDebugJs(fileName, jsSource)
+            throw ScriptException("Evaluation error in $fileName$line: ${e.message}$ctxSnippet${if (dumpPath != null) "\n  (compiled JS dumped to $dumpPath)" else ""}", e)
         } catch (e: Exception) {
             Context.exit()
+            dumpDebugJs(fileName, jsSource)
             throw ScriptException("Failed to execute script $fileName: ${e.message}", e)
         }
         // 注意：不 exit ctx，因为 executeFn 引用了 scope
@@ -339,25 +356,39 @@ class ScriptEngine {
         }
     }
 
-    /** 注入 println / print 到脚本 scope（Rhino 1.8 initStandardObjects 不含 shell 函数）。 */
+    /** 注入 println / print / console 到脚本 scope（Rhino 1.8 initStandardObjects 不含 shell 函数）。 */
     private fun injectPrintln(ctx: Context, scope: ScriptableObject) {
         val out = System.out
+        val err = System.err
+        fun joinArgs(args: Array<out Any?>): String =
+            args.joinToString(" ") { if (it == Undefined.instance) "undefined" else Context.toString(it) }
+
         val printlnFn = object : BaseFunction() {
             override fun call(cx: Context, s: Scriptable, thisObj: Scriptable, args: Array<out Any?>): Any? {
-                val line = args.joinToString(" ") { if (it == Undefined.instance) "undefined" else Context.toString(it) }
-                out.println(line)
-                return Undefined.instance
+                out.println(joinArgs(args)); return Undefined.instance
             }
         }
         val printFn = object : BaseFunction() {
             override fun call(cx: Context, s: Scriptable, thisObj: Scriptable, args: Array<out Any?>): Any? {
-                val line = args.joinToString(" ") { if (it == Undefined.instance) "undefined" else Context.toString(it) }
-                out.print(line)
-                return Undefined.instance
+                out.print(joinArgs(args)); return Undefined.instance
             }
         }
         ScriptableObject.putProperty(scope, "println", printlnFn)
         ScriptableObject.putProperty(scope, "print", printFn)
+
+        // console.{log,info,warn,error,debug} — TS 编译产物常用
+        val consoleObj = ctx.newObject(scope)
+        fun logFn(target: java.io.PrintStream, prefix: String = "") = object : BaseFunction() {
+            override fun call(cx: Context, s: Scriptable, thisObj: Scriptable, args: Array<out Any?>): Any? {
+                target.println(prefix + joinArgs(args)); return Undefined.instance
+            }
+        }
+        ScriptableObject.putProperty(consoleObj, "log", logFn(out))
+        ScriptableObject.putProperty(consoleObj, "info", logFn(out))
+        ScriptableObject.putProperty(consoleObj, "debug", logFn(out))
+        ScriptableObject.putProperty(consoleObj, "warn", logFn(err))
+        ScriptableObject.putProperty(consoleObj, "error", logFn(err))
+        ScriptableObject.putProperty(scope, "console", consoleObj)
     }
 
     /** 注入 setInterval / clearInterval / setTimeout / clearTimeout 到全局 scope。 */
@@ -502,6 +533,276 @@ class ScriptEngine {
         // 避免长期运行时泄漏。callExecute 使用自己的 Context，不受影响。
         exports.rhinoContext?.let {
             try { Context.exit() } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * 注入 `extend(BaseClass, jsImpl, ...ctorArgs)` —— 用 Rhino 的 JavaAdapter 动态生成
+     * 抽象类/接口的具体子类实例，把抽象方法路由到 jsImpl 上的同名 JS 函数。
+     *
+     * 用途：脚本里 `new MyAgent extends Agent {}` 这种 ES5 原型链继承没法真正继承 Java 抽象类，
+     * 应改写为 `extend(Agent, { getContextManager: ..., getSink: ..., getAuthorizer: ... }, config, openAi)`。
+     */
+    private fun injectExtend(ctx: Context, scope: ScriptableObject) {
+        val funcProto = ScriptableObject.getFunctionPrototype(scope)
+        val fn = object : BaseFunction(scope, funcProto) {
+            override fun call(cx: Context, s: Scriptable, thisObj: Scriptable, args: Array<out Any?>): Any? {
+                if (args.size < 2) throw ScriptException("extend(BaseClass, impl, [...ctorArgs]) requires at least 2 args")
+                val baseCls = ClassAutoRegistry.extractClass(args[0])
+                    ?: throw ScriptException("extend: first arg must be a Java class reference (got ${args[0]?.javaClass?.simpleName})")
+                val impl = args[1] as? Scriptable
+                    ?: throw ScriptException("extend: second arg must be a JS object (got ${args[1]?.javaClass?.simpleName})")
+                val njc = org.mozilla.javascript.NativeJavaClass(s, baseCls)
+                val adapterArgs: Array<Any?> = (listOf<Any?>(njc, impl) + args.drop(2)).toTypedArray()
+                val raw = invokeJsCreateAdapter(cx, s, adapterArgs)
+                // 包装返回值：拦截 suspend 方法调用，让 agent.receive(msg) 直接可用
+                return wrapSuspendMethods(cx, s, raw)
+            }
+            override fun construct(cx: Context, s: Scriptable, args: Array<out Any?>): Scriptable {
+                return call(cx, s, s, args) as? Scriptable
+                    ?: throw ScriptException("extend: JavaAdapter did not return a Scriptable")
+            }
+        }
+        ScriptableObject.putProperty(scope, "extend", fn)
+    }
+
+    /** 反射调用 Rhino 包私有的 JavaAdapter.js_createAdapter — 避免引入 Rhino 内部 API 的编译期依赖。 */
+    private fun invokeJsCreateAdapter(cx: Context, scope: Scriptable, args: Array<Any?>): Any? {
+        val cls = Class.forName("org.mozilla.javascript.JavaAdapter")
+        val method = cls.getDeclaredMethod(
+            "js_createAdapter",
+            Context::class.java,
+            Scriptable::class.java,
+            Array<Any?>::class.java
+        )
+        method.isAccessible = true
+        return try {
+            method.invoke(null, cx, scope, args)
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            throw e.cause ?: e
+        }
+    }
+
+    /**
+     * 如果 raw 是 NativeJavaObject 且底层类有 suspend 方法（JVM 签名末参 Continuation），
+     * 包一层 NativeJavaObjectProxy，让脚本直接 `agent.receive(msg)` 可用。
+     */
+    private fun wrapSuspendMethods(cx: Context, scope: Scriptable, raw: Any?): Any? {
+        if (raw !is org.mozilla.javascript.NativeJavaObject) return raw
+        val javaObj = raw.unwrap() ?: return raw
+        val cls = javaObj.javaClass
+        // 收集所有 suspend 方法：key=方法名, value=方法引用
+        val suspendMethods = mutableMapOf<String, java.lang.reflect.Method>()
+        for (m in cls.methods) {
+            val params = m.parameterTypes
+            if (params.isNotEmpty() && params.last() == kotlin.coroutines.Continuation::class.java) {
+                suspendMethods.putIfAbsent(m.name, m)
+            }
+        }
+        if (suspendMethods.isEmpty()) return raw
+        return NativeJavaObjectProxy(scope, javaObj, suspendMethods)
+    }
+
+    /**
+     * NativeJavaObject 子类：对 suspend 方法返回 JS 桥接函数（runBlocking 调用），
+     * 其余属性/方法全部委托给 NativeJavaObject 原生的 Java 反射机制。
+     * 继承 NativeJavaObject 保证 JavaAdapter 内部类型检查通过。
+     */
+    private class NativeJavaObjectProxy(
+        scope: Scriptable,
+        javaObj: Any,
+        private val suspendMethods: Map<String, java.lang.reflect.Method>,
+    ) : org.mozilla.javascript.NativeJavaObject(scope, javaObj, javaObj.javaClass) {
+
+        override fun get(name: String, start: Scriptable): Any? {
+            val method = suspendMethods[name]
+            if (method != null) return createBridge(method)
+            return super.get(name, start)
+        }
+
+        override fun has(name: String, start: Scriptable): Boolean =
+            suspendMethods.containsKey(name) || super.has(name, start)
+
+        private fun createBridge(method: java.lang.reflect.Method): BaseFunction {
+            val funcProto = ScriptableObject.getFunctionPrototype(parentScope ?: this)
+            val declaringClass = method.declaringClass
+            // suspend 方法：末参 Continuation，$default 签名 = (receiver, ...params, Continuation, int mask, DefaultConstructorMarker)
+            // 普通方法：$default 签名 = (receiver, ...params, int mask, DefaultConstructorMarker)
+            val isSuspend = method.parameterTypes.lastOrNull() == kotlin.coroutines.Continuation::class.java
+            val paramCountNoCont = if (isSuspend) method.parameterCount - 1 else method.parameterCount
+            val defaultMaskCount = (paramCountNoCont + 31) / 32
+            val expectedDefaultParamCount = paramCountNoCont + (if (isSuspend) 1 else 0) + defaultMaskCount + 1
+            val defaultMethod = declaringClass.methods.firstOrNull {
+                it.name == "${method.name}\$default" &&
+                    java.lang.reflect.Modifier.isStatic(it.modifiers) &&
+                    it.parameterCount == expectedDefaultParamCount
+            }
+
+            return object : BaseFunction(parentScope ?: this, funcProto) {
+                override fun call(cx: Context, s: Scriptable, thisObj: Scriptable, args: Array<out Any?>): Any? {
+                    return try {
+                        fun unwrap(v: Any?): Any? = if (v is org.mozilla.javascript.Wrapper) v.unwrap() else v
+                        val realObj = unwrap(this@NativeJavaObjectProxy) ?: this@NativeJavaObjectProxy
+                        val userArgs = args.map { unwrap(it) }.toMutableList()
+
+                        runBlocking {
+                            val deferred = kotlinx.coroutines.CompletableDeferred<Any?>()
+                            val bridgeCont = object : kotlin.coroutines.Continuation<Any?> {
+                                override val context: kotlin.coroutines.CoroutineContext =
+                                    kotlin.coroutines.EmptyCoroutineContext
+                                override fun resumeWith(result: Result<Any?>) {
+                                    result.fold(
+                                        onSuccess = { deferred.complete(it) },
+                                        onFailure = { deferred.completeExceptionally(it) }
+                                    )
+                                }
+                            }
+                            val invokeResult = if (defaultMethod != null && userArgs.size < paramCountNoCont) {
+                                val mask = computeDefaultMask(userArgs.size, paramCountNoCont)
+                                val values = buildDefaultArgs(userArgs, paramCountNoCont, method.parameterTypes, bridgeCont, isSuspend, defaultMaskCount, mask)
+                                defaultMethod.invoke(null, *values)
+                            } else {
+                                val realArgs = userArgs.toMutableList()
+                                if (isSuspend) {
+                                    while (realArgs.size < paramCountNoCont) realArgs.add(defaultPrimitive(method.parameterTypes[realArgs.size]))
+                                    realArgs.add(bridgeCont)
+                                }
+                                method.invoke(realObj, *realArgs.toTypedArray())
+                            }
+                            if (invokeResult !== COROUTINE_SUSPENDED) deferred.complete(invokeResult)
+                            deferred.await()
+                        }
+                    } catch (e: java.lang.reflect.InvocationTargetException) {
+                        throw ScriptException("${method.name} failed: ${e.cause?.message ?: e.message}", e.cause ?: e)
+                    } catch (e: ScriptException) {
+                        throw e
+                    } catch (e: Exception) {
+                        throw ScriptException("${method.name} failed: ${e.message}", e)
+                    }
+                }
+            }
+        }
+
+        /** 构建 $default 方法参数：[receiver, ...userValues, ...defaults, (continuation?), ...masks, null] */
+        private fun buildDefaultArgs(
+            userArgs: List<Any?>,
+            paramCount: Int,
+            paramTypes: Array<Class<*>>,
+            cont: kotlin.coroutines.Continuation<Any?>,
+            isSuspend: Boolean,
+            maskCount: Int,
+            mask: IntArray,
+        ): Array<Any?> {
+            val values = arrayOfNulls<Any?>(paramCount)
+            for (i in 0 until paramCount) {
+                values[i] = if (i < userArgs.size) userArgs[i] else defaultPrimitive(paramTypes[i])
+            }
+            val result = mutableListOf<Any?>()
+            result.add(null) // receiver（$default 是 static 方法，第一个参数是 receiver）
+            result.addAll(values)
+            if (isSuspend) result.add(cont)
+            for (m in mask) result.add(m)
+            result.add(null) // DefaultConstructorMarker
+            return result.toTypedArray()
+        }
+
+        /** 计算 bitmask：已提供的参数位 = 0，未提供的参数位 = 1（使用默认值） */
+        private fun computeDefaultMask(provided: Int, total: Int): IntArray {
+            val maskCount = (total + 31) / 32
+            val masks = IntArray(maskCount)
+            for (i in provided until total) {
+                masks[i / 32] = masks[i / 32] or (1 shl (i % 32))
+            }
+            return masks
+        }
+
+        /** 原始类型的默认值（避免 null 传给 boolean/int 等导致 NPE） */
+        private fun defaultPrimitive(t: Class<*>): Any? = when (t) {
+            Boolean::class.javaPrimitiveType, java.lang.Boolean::class.java -> false
+            Int::class.javaPrimitiveType, java.lang.Integer::class.java -> 0
+            Long::class.javaPrimitiveType, java.lang.Long::class.java -> 0L
+            Double::class.javaPrimitiveType, java.lang.Double::class.java -> 0.0
+            Float::class.javaPrimitiveType, java.lang.Float::class.java -> 0f
+            Byte::class.javaPrimitiveType, java.lang.Byte::class.java -> 0.toByte()
+            Short::class.javaPrimitiveType, java.lang.Short::class.java -> 0.toShort()
+            Char::class.javaPrimitiveType, java.lang.Character::class.java -> ' '
+            else -> null
+        }
+    }
+
+    /**
+     * 注入 `callReceive(agent, msg, replySink?, clearContextAfter?)` —— 调用 Kotlin suspend fun receive。
+     * suspend fun 在 JVM 编译后多出 Continuation 参数，JS 直接调用会找不到方法。
+     * 此包装通过反射调用 suspend 方法，用 runBlocking + CompletableDeferred 桥接协程。
+     */
+    private fun injectCallReceive(ctx: Context, scope: ScriptableObject) {
+        val funcProto = ScriptableObject.getFunctionPrototype(scope)
+        val fn = object : BaseFunction(scope, funcProto) {
+            override fun call(cx: Context, s: Scriptable, thisObj: Scriptable, args: Array<out Any?>): Any? {
+                if (args.size < 2) throw ScriptException("callReceive(agent, msg, [replySink], [clearContextAfter]) requires at least 2 args")
+                fun unwrap(v: Any?): Any? = if (v is org.mozilla.javascript.Wrapper) v.unwrap() else v
+                val agent = unwrap(args[0]) ?: throw ScriptException("callReceive: agent is null")
+                val msg = unwrap(args[1]) ?: throw ScriptException("callReceive: msg is null")
+                val replySink = if (args.size > 2 && args[2] != Undefined.instance) unwrap(args[2]) else null
+                val clearContext = if (args.size > 3 && args[3] != Undefined.instance) Context.toBoolean(args[3]) else false
+
+                return try {
+                    val cls = agent.javaClass
+                    val receiveMethod = cls.methods.firstOrNull {
+                        it.name == "receive" && it.parameterCount == 4
+                    } ?: throw ScriptException("callReceive: cannot find suspend receive method on ${cls.simpleName}")
+
+                    runBlocking {
+                        val deferred = kotlinx.coroutines.CompletableDeferred<Any?>()
+                        val bridgeCont = object : kotlin.coroutines.Continuation<Any?> {
+                            override val context: kotlin.coroutines.CoroutineContext =
+                                kotlin.coroutines.EmptyCoroutineContext
+                            override fun resumeWith(result: Result<Any?>) {
+                                result.fold(
+                                    onSuccess = { deferred.complete(it) },
+                                    onFailure = { deferred.completeExceptionally(it) }
+                                )
+                            }
+                        }
+                        val invokeResult = receiveMethod.invoke(agent, msg, replySink, clearContext, bridgeCont)
+                        if (invokeResult !== COROUTINE_SUSPENDED) deferred.complete(invokeResult)
+                        deferred.await()
+                    }
+                } catch (e: java.lang.reflect.InvocationTargetException) {
+                    throw ScriptException("callReceive failed: ${e.cause?.message ?: e.message}", e.cause ?: e)
+                } catch (e: ScriptException) {
+                    throw e
+                } catch (e: Exception) {
+                    throw ScriptException("callReceive failed: ${e.message}", e)
+                }
+            }
+        }
+        ScriptableObject.putProperty(scope, "callReceive", fn)
+    }
+
+    /** Dump 编译后 JS 到 config/scripts/.debug/，方便对照行号定位运行时错误。 */
+    private fun dumpDebugJs(fileName: String, jsSource: String): String? = try {
+        val dir = java.io.File("config/scripts/.debug").apply { mkdirs() }
+        val out = java.io.File(dir, fileName.removeSuffix(".ts") + ".js")
+        out.writeText(jsSource, Charsets.UTF_8)
+        out.absolutePath
+    } catch (_: Exception) { null }
+
+    /** 返回错误行附近的代码片段。errorLine 已包含 wrapper 偏移（wrapper 第 1 行是 `var __script_result = (function() {`）。 */
+    private fun snippetAround(jsSource: String, errorLine: Int): String {
+        if (errorLine <= 1) return ""
+        val lines = jsSource.split('\n')
+        // wrapper 在 jsSource 前面包了 1 行，所以 jsSource 行号 = errorLine - 1
+        val jsLine = errorLine - 1
+        if (jsLine < 1 || jsLine > lines.size) return ""
+        val from = (jsLine - 2).coerceAtLeast(1)
+        val to = (jsLine + 2).coerceAtMost(lines.size)
+        return buildString {
+            append("\n  ---- compiled JS around line ", jsLine, " ----")
+            for (i in from..to) {
+                val marker = if (i == jsLine) ">> " else "   "
+                append("\n  ", marker, i, ": ", lines[i - 1])
+            }
         }
     }
 

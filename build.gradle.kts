@@ -30,6 +30,12 @@ configurations.all {
         force("io.ktor:ktor-websockets:3.4.3")
         force("io.ktor:ktor-client-auth:3.4.3")
         force("io.ktor:ktor-client-logging:3.4.3")
+        force("io.ktor:ktor-io:3.4.3")
+        force("io.ktor:ktor-utils:3.4.3")
+        force("io.ktor:ktor-events:3.4.3")
+        force("io.ktor:ktor-sse:3.4.3")
+        force("io.ktor:ktor-client-sse:3.4.3")
+        force("io.ktor:ktor-client-encoding:3.4.3")
     }
 }
 
