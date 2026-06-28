@@ -6,6 +6,7 @@ plugins {
     id("com.gradleup.shadow") version "9.0.0-beta12"
     id("com.google.devtools.ksp")
     id("com.vanniktech.maven.publish") version "0.30.0"
+    application
 }
 
 group = "io.github.zenthxsin"
@@ -81,6 +82,11 @@ kotlin {
     jvmToolchain(21)
 }
 
+application {
+    mainClass.set("org.example.vicky.examples.ConsoleMainKt")
+    applicationDefaultJvmArgs = listOf("--add-modules", "jdk.incubator.vector")
+}
+
 tasks.jar {
     archiveBaseName.set("Vicky")
     archiveVersion.set(project.version.toString())
@@ -108,6 +114,7 @@ tasks.build {
 tasks.test {
     useJUnitPlatform()
     failOnNoDiscoveredTests = false
+    jvmArgs("--add-modules", "jdk.incubator.vector")
 }
 
 mavenPublishing {

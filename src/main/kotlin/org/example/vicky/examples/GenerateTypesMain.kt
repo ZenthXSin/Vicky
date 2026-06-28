@@ -106,6 +106,9 @@ declare function onUnload(): void;
 /** 打印到标准输出（Rhino 内置） */
 declare function println(...args: any[]): void;
 
+/** extend(BaseClass, impl, ...ctorArgs) — 动态生成 Java 抽象类/接口的子类实例 */
+declare function extend<T = any>(baseClass: any, impl: Record<string, (...args: any[]) => any>, ...ctorArgs: any[]): T;
+
 """)
 
     // ─── Java.type() 兜底 ───
@@ -209,8 +212,7 @@ declare const Java: JavaAPI;
             }
             sb.appendLine("${indent}};")
         } else {
-            // 普通类 → 构造函数 + 实例类型
-            // 先声明 interface
+            // 普通类
             sb.appendLine("${indent}interface ${name}Interface {")
             for (f in cls.fields.filter { !it.isStatic }) {
                 sb.appendLine("${indent}    ${f.name}: ${mapType(f.type)};")
@@ -220,18 +222,29 @@ declare const Java: JavaAPI;
                 val ret = mapType(m.returnType)
                 sb.appendLine("${indent}    ${m.name}($params): $ret;")
             }
-            sb.appendLine("${indent}}")
-            sb.appendLine()
-
-            // 构造函数声明
-            if (cls.constructors.isEmpty()) {
-                sb.appendLine("${indent}declare function $name(): ${name}Interface;")
-            } else {
-                for (ctor in cls.constructors) {
-                    val params = mapParams(ctor.params)
-                    sb.appendLine("${indent}declare function $name($params): ${name}Interface;")
+            // Kotlin interface 属性编译为抽象 getter，cls.fields 为空；将 getXxx() 转为属性声明
+            val existingFieldNames = cls.fields.map { it.name }.toSet()
+            for (m in cls.methods.filter { it.params.isEmpty() && it.name.startsWith("get") && it.name.length > 3 && it.returnType != "void" }) {
+                val propName = m.name.removePrefix("get").replaceFirstChar { it.lowercase() }
+                if (propName !in existingFieldNames && propName != "class") {
+                    sb.appendLine("${indent}    readonly $propName: ${mapType(m.returnType)};")
                 }
             }
+            sb.appendLine("${indent}}")
+            sb.appendLine()
+            // 接口合并：让 Name 同时作为类型和构造函数
+            sb.appendLine("${indent}interface $name extends ${name}Interface {}")
+            sb.appendLine("${indent}declare class $name {")
+            // 静态字段（companion object @JvmStatic 成员等）
+            for (f in cls.fields.filter { it.isStatic }) {
+                sb.appendLine("${indent}    static readonly ${f.name}: ${mapType(f.type)};")
+            }
+            // 多参数类添加命名参数重载
+            if (cls.constructors.any { it.params.size > 3 }) {
+                sb.appendLine("${indent}    constructor(config: Record<string, any>);")
+            }
+            sb.appendLine("${indent}    constructor(...args: any[]);")
+            sb.appendLine("${indent}}")
         }
 
         sb.appendLine()

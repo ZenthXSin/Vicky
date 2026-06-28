@@ -845,6 +845,18 @@ class ScriptEngine {
         /** TypeScript 编译线程栈大小（默认 1MB 栈不够 tsc 的深度递归） */
         private const val COMPILER_STACK_SIZE = 8 * 1024 * 1024L // 8MB
 
+        init {
+            if (!org.mozilla.javascript.ContextFactory.hasExplicitGlobal()) {
+                org.mozilla.javascript.ContextFactory.initGlobal(object : org.mozilla.javascript.ContextFactory() {
+                    private val wf = object : org.mozilla.javascript.WrapFactory() {
+                        override fun wrap(cx: Context, scope: Scriptable, obj: Any?, staticType: Class<*>?) =
+                            if (obj is String) obj else super.wrap(cx, scope, obj, staticType)
+                    }
+                    override fun makeContext() = super.makeContext().also { it.wrapFactory = wf }
+                })
+            }
+        }
+
         /** 精简版 Promise polyfill，供 Rhino 执行 TS 编译产物中的 async 代码 */
         private const val PROMISE_POLYFILL = """
 if (typeof Promise === 'undefined') {

@@ -242,11 +242,90 @@ async function execute(ctx, args) {
 | `array` | any[] | `["a","b"]` |
 | `object` | object | `{key:"value"}` |
 
+## 高级模式：直接编写 Agent 脚本
+
+除了 Tool 脚本，还可以直接编写完整的 Agent 脚本（无需 `execute` 导出），用于测试、调试或独立运行。
+
+### 完整 Agent 构建示例
+
+```typescript
+// 1. Agent 配置
+const config = new AgentConfig({
+    model: new ModelId("deepseek-v4-flash"),
+    apiKey: "sk-...",
+    baseUrl: "http://192.168.0.108:3000/v1",
+    mode: AgentMode.VERBOSE,   // SILENT / VERBOSE / CHAT
+    maxSteps: 6,
+    agentMd: "你是 Vicky，一个简洁的助手。",
+    debug: false,
+    builtinTools: true,
+    streaming: false,
+});
+
+// 2. Context Manager（管理对话历史与压缩）
+const contextManager = new DefaultContextManager({
+    store: new ConversationStore(),
+    builder: new ContextBuilder(config.agentMd),
+    compactor: new ContextCompactor(config, OpenAiClientFactory.create(config)),
+});
+
+// 3. MessageSink（处理 Agent 输出）
+// out.type 可取值："AgentReply" / "ToolReply" / "Debug" / "Think"
+const sink = new MessageSink((out: OutboundMessage) => {
+    switch (out.type) {
+        case "AgentReply": println(`[agent] ${out.content}`); break;
+        case "ToolReply":  println(`[tool] ${out.content}`);  break;
+        case "Debug":      println(`[debug] ${out.content}`); break;
+        case "Think":      println(`[think] ${out.content}`); break;
+    }
+});
+
+// 4. ToolAuthorizer（工具调用权限控制）
+const authorizer = new ToolAuthorizer((userId: string, toolName: string) => {
+    if (toolName === "shutdown") return userId === "admin";
+    return true;
+});
+
+// 5. 用 extend() 创建 Agent 实例
+// extend(BaseClass, jsImpl, ...ctorArgs) 动态生成抽象类的具体子类
+// getXxx 是 Kotlin val 编译后的 JVM getter 名
+const agent = extend(Agent, {
+    getContextManager: () => contextManager,
+    getSink: () => sink,
+    getAuthorizer: () => authorizer,
+}, config, OpenAiClientFactory.create(config));
+
+// 6. 发送消息
+// InboundMessage(userId, content, conversationId?)
+agent.receive(new InboundMessage("user1", "你好", "user1"));
+```
+
+### AgentMode 说明
+
+| 值 | 说明 |
+|----|------|
+| `AgentMode.SILENT` | 静默模式，仅 sink 收到输出 |
+| `AgentMode.VERBOSE` | 详细模式，输出思考过程和工具调用 |
+| `AgentMode.CHAT` | 对话模式 |
+
+### extend() 规则
+
+- 第一个参数：Java/Kotlin 抽象类（如 `Agent`）
+- 第二个参数：覆盖 getter 的 JS 对象，key 为 `getXxx`（对应 Kotlin `val xxx`）
+- 其余参数：传给构造函数
+- 返回值：可直接调用 `agent.receive()` 等 suspend 方法（引擎自动处理协程）
+
+## Kotlin 互操作注意事项
+
+- Kotlin 数据类支持命名参数构造（推荐）：`new AgentConfig({ model: new ModelId("..."), apiKey: "..." })`
+- Kotlin String 属性可直接与 JS 字符串比较，`switch(out.type)` 和 `=== "AgentReply"` 均直接工作，无需 `String()` 转换
+- Kotlin sealed interface 的子类型可通过 `.type` 字段区分（如 `OutboundMessage` 的 `"AgentReply"` / `"ToolReply"` / `"Debug"` / `"Think"`）
+
 ## 注意事项
 
 - 脚本运行在 Rhino JS 引擎中，**不是** Node.js，不能用 npm 包
+- 用 TypeScript 编写脚本（编译器自动转为 ES5），`const`/`let`、箭头函数、模板字符串等 TS 语法均可正常使用
 - 异步函数（async）会被同步执行（Promise polyfill），不需要 await 外部 Promise
-- 不要使用 ES6+ 的 `let`/`const`（Rhino 对其支持不完整），统一用 `var`
-- 不要使用可选链 `?.`、空值合并 `??` 等新语法
+- 不要使用可选链 `?.`、空值合并 `??` 等新语法（Rhino 运行时不支持）
 - 文件路径建议使用相对路径（相对于工作目录）
 - 大文件操作注意内存，避免一次读取超大文件
