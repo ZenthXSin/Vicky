@@ -34,6 +34,7 @@ data class ConfigData(
     val embedding: EmbeddingConfigData = EmbeddingConfigData(),
     val oneBot: OneBotConfigData = OneBotConfigData(),
     val qdrant: QdrantConfigData = QdrantConfigData(),
+    val vectorStore: VectorStoreConfigData = VectorStoreConfigData(),
     val memory: MemoryConfigData = MemoryConfigData(),
 )
 
@@ -43,6 +44,12 @@ data class QdrantConfigData(
     val grpcPort: Int = 6334,
     val httpPort: Int = 6333,
     val enabled: Boolean = false,
+)
+
+@Serializable
+data class VectorStoreConfigData(
+    val type: String = "jvector",  // "jvector" | "qdrant"
+    val dataDir: String = "data/vector",
 )
 
 @Serializable
@@ -311,8 +318,11 @@ object ConfigManager {
     fun toMemoryConfig(configData: ConfigData): MemoryConfig {
         val memory = configData.memory
         val qdrant = configData.qdrant
+        val vs = configData.vectorStore
         return MemoryConfig(
             embedding = toEmbeddingConfig(configData.embedding),
+            vectorStoreType = vs.type,
+            vectorStoreDataDir = vs.dataDir,
             qdrantHost = if (qdrant.enabled) qdrant.host else null,
             qdrantGrpcPort = qdrant.grpcPort,
             qdrantHttpPort = qdrant.httpPort,

@@ -45,6 +45,8 @@ dependencies {
     implementation(project(":src:main:vicky-vibe"))
 
     implementation("com.aallam.openai:openai-client:4.1.0")
+    implementation("io.github.jbellis:jvector:3.0.6")
+    implementation("org.xerial:sqlite-jdbc:3.49.1.0")
 
     implementation("io.ktor:ktor-client-okhttp:3.0.0")
     implementation("io.ktor:ktor-client-content-negotiation:3.0.0")

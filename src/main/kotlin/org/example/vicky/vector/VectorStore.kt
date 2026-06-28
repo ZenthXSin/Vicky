@@ -66,4 +66,7 @@ interface VectorStore {
 
     /** 按 ID 更新记录的 payload 字段（不影响向量）。 */
     suspend fun setPayload(collection: String, ids: List<String>, payload: Map<String, Any>)
+
+    /** 关闭存储，释放资源。 */
+    fun close() {}
 }

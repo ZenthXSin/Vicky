@@ -333,7 +333,7 @@ class QdrantVectorStore(
         }
     }
 
-    fun close() {
+    override fun close() {
         client.close()
     }
 }

@@ -53,6 +53,8 @@ import java.util.concurrent.atomic.AtomicLong
  */
 data class MemoryConfig(
     val embedding: EmbeddingConfig? = null,
+    val vectorStoreType: String = "jvector",
+    val vectorStoreDataDir: String = "data/vector",
     val qdrantHost: String? = null,
     val qdrantGrpcPort: Int = 6334,
     val qdrantHttpPort: Int = 6333,
@@ -415,7 +417,7 @@ class OneBot(
         private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
         // 语义记忆组件
-        private var vectorStore: QdrantVectorStore? = null
+        private var vectorStore: org.example.vicky.vector.VectorStore? = null
         private var memoryStore: QdrantMemoryStore? = null
         private var fileIndexService: FileIndexService? = null
         private var distillationScheduler: DistillationScheduler? = null
@@ -428,13 +430,25 @@ class OneBot(
                 println("[Vicky] 语义模型已加载（$dimText）")
             }
 
-            if (memConfig.qdrantHost != null && embeddingClient != null) {
-                try {
-                    vectorStore = QdrantVectorStore(memConfig.qdrantHost, memConfig.qdrantHttpPort)
-                    println("[Vicky] 向量存储已连接: ${memConfig.qdrantHost}:${memConfig.qdrantHttpPort}")
-                } catch (e: Exception) {
-                    println("[Vicky] Qdrant 连接失败: ${e.message}")
-                    println("[Vicky] 记忆功能已禁用")
+            if (embeddingClient != null) {
+                when (memConfig.vectorStoreType) {
+                    "qdrant" -> {
+                        if (memConfig.qdrantHost != null) {
+                            try {
+                                vectorStore = QdrantVectorStore(memConfig.qdrantHost, memConfig.qdrantHttpPort)
+                                println("[Vicky] 向量存储已连接 (Qdrant): ${memConfig.qdrantHost}:${memConfig.qdrantHttpPort}")
+                            } catch (e: Exception) {
+                                println("[Vicky] Qdrant 连接失败: ${e.message}")
+                                println("[Vicky] 记忆功能已禁用")
+                            }
+                        }
+                    }
+                    else -> {
+                        // 默认使用 JVector 内置向量存储
+                        val dataDir = java.io.File(memConfig.vectorStoreDataDir)
+                        vectorStore = org.example.vicky.vector.JVectorStore(dataDir)
+                        println("[Vicky] 向量存储已初始化 (JVector 内置): ${dataDir.absolutePath}")
+                    }
                 }
             }
 
