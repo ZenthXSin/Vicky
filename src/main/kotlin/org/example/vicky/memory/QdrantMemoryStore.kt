@@ -189,20 +189,9 @@ class QdrantMemoryStore(
             }
             put("distilled", false)
         }
-        // 分页加载，避免遗漏超过 1000 条的记录
-        val allRecords = mutableListOf<VectorRecord>()
-        var offset: String? = null
-        while (true) {
-            val batch = vectorStore.scrollPayloadOnly(
-                rawCollectionName, 1000, if (filter.isEmpty()) null else filter,
-            )
-            if (batch.isEmpty()) break
-            allRecords.addAll(batch)
-            if (batch.size < 1000) break
-            // Qdrant scroll 没有 offset，但我们可以靠 filter 精确匹配来兜底
-            // 这里用 size < limit 作为终止条件即可
-            break
-        }
+        val allRecords = vectorStore.scrollPayloadOnly(
+            rawCollectionName, Int.MAX_VALUE, if (filter.isEmpty()) null else filter,
+        )
         return allRecords.map { record ->
             val payload = record.payload
             RawMemory(

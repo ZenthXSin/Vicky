@@ -33,17 +33,8 @@ data class ConfigData(
     val skillStates: Map<String, Boolean> = emptyMap(),
     val embedding: EmbeddingConfigData = EmbeddingConfigData(),
     val oneBot: OneBotConfigData = OneBotConfigData(),
-    val qdrant: QdrantConfigData = QdrantConfigData(),
     val vectorStore: VectorStoreConfigData = VectorStoreConfigData(),
     val memory: MemoryConfigData = MemoryConfigData(),
-)
-
-@Serializable
-data class QdrantConfigData(
-    val host: String = "localhost",
-    val grpcPort: Int = 6334,
-    val httpPort: Int = 6333,
-    val enabled: Boolean = false,
 )
 
 @Serializable
@@ -317,15 +308,10 @@ object ConfigManager {
 
     fun toMemoryConfig(configData: ConfigData): MemoryConfig {
         val memory = configData.memory
-        val qdrant = configData.qdrant
         val vs = configData.vectorStore
         return MemoryConfig(
             embedding = toEmbeddingConfig(configData.embedding),
-            vectorStoreType = vs.type,
             vectorStoreDataDir = vs.dataDir,
-            qdrantHost = if (qdrant.enabled) qdrant.host else null,
-            qdrantGrpcPort = qdrant.grpcPort,
-            qdrantHttpPort = qdrant.httpPort,
             memoryEnabled = memory.enabled,
             memoryTopK = memory.topK,
             memoryTokenBudget = memory.tokenBudget,

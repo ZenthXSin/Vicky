@@ -16,6 +16,8 @@ const contextManager = new DefaultContextManager({
     compactor: new ContextCompactor(config, OpenAiClientFactory.create(config)),
 });
 
+const sessionStore = new SqliteSessionStore(new File("data/hello-sessions"));
+
 const sink = new MessageSink((out: OutboundMessage) => {
     switch (out.type) {
         case "AgentReply": println(`[agent] ${out.content}`); break;
@@ -30,17 +32,20 @@ const authorizer = new ToolAuthorizer((userId: string, toolName: string) => {
     return true;
 });
 
-// 用 extend 动态生成 Agent 的具体子类。getXxx 是 Kotlin val 编译后的 JVM getter 名。
-// extend(BaseClass, jsImpl, ...ctorArgs) → Java 实例，agent.receive() 等方法真正可用。
+// 用 extend 动态生成 Agent 的具体子类。getXxx 对应 Kotlin val 编译后的 JVM getter。
+// 可覆盖：getContextManager / getSink / getAuthorizer / getSessionStore / getBuffer 等。
+// extend(BaseClass, jsImpl, ...ctorArgs) → Java 实例
+// 推荐用法：agent.session("userId").receive(msg)；agent.receive(msg) 是兼容层，内部委托到 session.receive()。
 const agent = extend(Agent, {
     getContextManager: () => contextManager,
     getSink: () => sink,
     getAuthorizer: () => authorizer,
+    getSessionStore: () => sessionStore,
 }, config, OpenAiClientFactory.create(config));
 
-//println("[test] calling agent.receive...");
+//println("[test] calling session.receive...");
 try {
-//    agent.receive(new InboundMessage("user1", "你好","你好"));
+//    agent.session("user1").receive(new InboundMessage("user1", "你好", "user1"));
 //    println("[test] receive done");
 } catch (e) {
 //    println("[test] receive error: " + e);

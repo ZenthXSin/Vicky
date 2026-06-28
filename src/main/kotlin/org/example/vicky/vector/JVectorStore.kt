@@ -8,16 +8,18 @@ import io.github.jbellis.jvector.graph.similarity.BuildScoreProvider
 import io.github.jbellis.jvector.util.Bits
 import io.github.jbellis.jvector.vector.VectorSimilarityFunction
 import io.github.jbellis.jvector.vector.types.VectorFloat
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.*
 import java.io.File
 import java.nio.ByteBuffer
 import java.sql.Connection
 import java.sql.DriverManager
-import java.util.concurrent.ConcurrentHashMap
 
 class JVectorStore(dataDir: File = File("data/vector")) : VectorStore {
 
     private val vts = BuildScoreProvider.vts
+    private val mutex = Mutex()
 
     private val db: Connection = run {
         dataDir.mkdirs()
@@ -42,8 +44,7 @@ class JVectorStore(dataDir: File = File("data/vector")) : VectorStore {
         val vectors = mutableListOf<FloatArray>()
         val idToIndex = HashMap<String, Int>()
         val indexToId = HashMap<Int, String>()
-        val payloads = ConcurrentHashMap<String, Map<String, Any>>()
-        val deletedIds = ConcurrentHashMap.newKeySet<String>()
+        val payloads = HashMap<String, Map<String, Any>>()
         var graphIndex: OnHeapGraphIndex? = null
 
         fun ravv(): RandomAccessVectorValues = object : RandomAccessVectorValues {
@@ -55,48 +56,48 @@ class JVectorStore(dataDir: File = File("data/vector")) : VectorStore {
         }
     }
 
-    private val collections = ConcurrentHashMap<String, CollectionState>()
+    private val collections = HashMap<String, CollectionState>()
 
     override suspend fun upsert(collection: String, records: List<VectorRecord>) {
         if (records.isEmpty()) return
-        val state = collections[collection] ?: error("Collection '$collection' 未初始化，请先调用 ensureCollection")
-
-        db.autoCommit = false
-        try {
-            db.prepareStatement(
-                "INSERT OR REPLACE INTO vectors(collection,id,vector,payload,deleted) VALUES(?,?,?,?,0)"
-            ).use { stmt ->
-                for (record in records) {
-                    check(record.vector.size == state.dimension) {
-                        "向量维度不匹配: 期望=${state.dimension}, 实际=${record.vector.size}"
+        mutex.withLock {
+            val state = collections[collection] ?: error("Collection '$collection' 未初始化，请先调用 ensureCollection")
+            db.autoCommit = false
+            try {
+                db.prepareStatement(
+                    "INSERT OR REPLACE INTO vectors(collection,id,vector,payload,deleted) VALUES(?,?,?,?,0)"
+                ).use { stmt ->
+                    for (record in records) {
+                        check(record.vector.size == state.dimension) {
+                            "向量维度不匹配: 期望=${state.dimension}, 实际=${record.vector.size}"
+                        }
+                        val existingIdx = state.idToIndex[record.id]
+                        if (existingIdx != null) {
+                            state.vectors[existingIdx] = record.vector.copyOf()
+                        } else {
+                            val idx = state.vectors.size
+                            state.vectors.add(record.vector.copyOf())
+                            state.idToIndex[record.id] = idx
+                            state.indexToId[idx] = record.id
+                        }
+                        state.payloads[record.id] = record.payload
+                        stmt.setString(1, collection)
+                        stmt.setString(2, record.id)
+                        stmt.setBytes(3, record.vector.toBytes())
+                        stmt.setString(4, record.payload.toJson())
+                        stmt.addBatch()
                     }
-                    val existingIdx = state.idToIndex[record.id]
-                    if (existingIdx != null) {
-                        state.vectors[existingIdx] = record.vector.copyOf()
-                    } else {
-                        val idx = state.vectors.size
-                        state.vectors.add(record.vector.copyOf())
-                        state.idToIndex[record.id] = idx
-                        state.indexToId[idx] = record.id
-                    }
-                    state.payloads[record.id] = record.payload
-                    state.deletedIds.remove(record.id)
-                    stmt.setString(1, collection)
-                    stmt.setString(2, record.id)
-                    stmt.setBytes(3, record.vector.toBytes())
-                    stmt.setString(4, record.payload.toJson())
-                    stmt.addBatch()
+                    stmt.executeBatch()
                 }
-                stmt.executeBatch()
+                db.commit()
+            } catch (e: Exception) {
+                db.rollback()
+                throw e
+            } finally {
+                db.autoCommit = true
             }
-            db.commit()
-        } catch (e: Exception) {
-            db.rollback()
-            throw e
-        } finally {
-            db.autoCommit = true
+            rebuildGraph(state)
         }
-        rebuildGraph(state)
     }
 
     override suspend fun search(
@@ -104,12 +105,10 @@ class JVectorStore(dataDir: File = File("data/vector")) : VectorStore {
         vector: FloatArray,
         topK: Int,
         filter: Map<String, Any>?,
-    ): List<SearchResult> {
-        val state = collections[collection] ?: return emptyList()
-        val graph = state.graphIndex ?: return emptyList()
+    ): List<SearchResult> = mutex.withLock {
+        val state = collections[collection] ?: return@withLock emptyList()
+        val graph = state.graphIndex ?: return@withLock emptyList()
         check(vector.size == state.dimension) { "查询向量维度不匹配: 期望=${state.dimension}, 实际=${vector.size}" }
-
-        val aliveBits = Bits { i -> state.indexToId[i]?.let { it !in state.deletedIds } ?: false }
 
         val result = GraphSearcher.search(
             vts.createFloatVector(vector),
@@ -117,10 +116,10 @@ class JVectorStore(dataDir: File = File("data/vector")) : VectorStore {
             state.ravv(),
             VectorSimilarityFunction.COSINE,
             graph,
-            aliveBits,
+            Bits.ALL,
         )
 
-        return result.nodes.mapNotNull { ns ->
+        result.nodes.mapNotNull { ns ->
             val id = state.indexToId[ns.node] ?: return@mapNotNull null
             val payload = state.payloads[id] ?: emptyMap()
             if (filter != null && !matchesFilter(payload, filter)) return@mapNotNull null
@@ -130,34 +129,47 @@ class JVectorStore(dataDir: File = File("data/vector")) : VectorStore {
 
     override suspend fun delete(collection: String, ids: List<String>) {
         if (ids.isEmpty()) return
-        val state = collections[collection] ?: return
-        db.prepareStatement("UPDATE vectors SET deleted=1 WHERE collection=? AND id=?").use { stmt ->
-            for (id in ids) {
-                state.deletedIds.add(id)
-                stmt.setString(1, collection)
-                stmt.setString(2, id)
-                stmt.addBatch()
+        mutex.withLock {
+            val state = collections[collection] ?: return@withLock
+            db.prepareStatement("DELETE FROM vectors WHERE collection=? AND id=?").use { stmt ->
+                for (id in ids) {
+                    stmt.setString(1, collection)
+                    stmt.setString(2, id)
+                    stmt.addBatch()
+                }
+                stmt.executeBatch()
             }
-            stmt.executeBatch()
+            compact(state, ids.toSet())
+            rebuildGraph(state)
         }
     }
 
     override suspend fun deleteByFilter(collection: String, filter: Map<String, Any>) {
-        val state = collections[collection] ?: return
-        val toDelete = state.payloads.keys.filter { id ->
-            id !in state.deletedIds && matchesFilter(state.payloads[id] ?: emptyMap(), filter)
+        mutex.withLock {
+            val state = collections[collection] ?: return@withLock
+            val toDelete = state.payloads.keys.filter { id -> matchesFilter(state.payloads[id] ?: emptyMap(), filter) }.toSet()
+            if (toDelete.isEmpty()) return@withLock
+            db.prepareStatement("DELETE FROM vectors WHERE collection=? AND id=?").use { stmt ->
+                for (id in toDelete) {
+                    stmt.setString(1, collection)
+                    stmt.setString(2, id)
+                    stmt.addBatch()
+                }
+                stmt.executeBatch()
+            }
+            compact(state, toDelete)
+            rebuildGraph(state)
         }
-        delete(collection, toDelete)
     }
 
     override suspend fun scroll(
         collection: String,
         limit: Int,
         filter: Map<String, Any>?,
-    ): List<VectorRecord> {
-        val state = collections[collection] ?: return emptyList()
-        return state.payloads.entries
-            .filter { (id, p) -> id !in state.deletedIds && (filter == null || matchesFilter(p, filter)) }
+    ): List<VectorRecord> = mutex.withLock {
+        val state = collections[collection] ?: return@withLock emptyList()
+        state.payloads.entries
+            .filter { (_, p) -> filter == null || matchesFilter(p, filter) }
             .take(limit)
             .map { (id, p) ->
                 val vec = state.idToIndex[id]?.let { state.vectors[it] } ?: floatArrayOf()
@@ -169,44 +181,48 @@ class JVectorStore(dataDir: File = File("data/vector")) : VectorStore {
         collection: String,
         limit: Int,
         filter: Map<String, Any>?,
-    ): List<VectorRecord> {
-        val state = collections[collection] ?: return emptyList()
-        return state.payloads.entries
-            .filter { (id, p) -> id !in state.deletedIds && (filter == null || matchesFilter(p, filter)) }
+    ): List<VectorRecord> = mutex.withLock {
+        val state = collections[collection] ?: return@withLock emptyList()
+        state.payloads.entries
+            .filter { (_, p) -> filter == null || matchesFilter(p, filter) }
             .take(limit)
             .map { (id, p) -> VectorRecord(id, floatArrayOf(), p) }
     }
 
     override suspend fun ensureCollection(collection: String, dimension: Int) {
-        val existing = collections[collection]
-        if (existing != null) {
-            if (existing.dimension != dimension) {
-                collections.remove(collection)
-                db.prepareStatement("DELETE FROM vectors WHERE collection=?").use {
-                    it.setString(1, collection)
-                    it.executeUpdate()
+        mutex.withLock {
+            val existing = collections[collection]
+            if (existing != null) {
+                if (existing.dimension != dimension) {
+                    collections.remove(collection)
+                    db.prepareStatement("DELETE FROM vectors WHERE collection=?").use {
+                        it.setString(1, collection)
+                        it.executeUpdate()
+                    }
+                    loadCollection(collection, dimension)
                 }
-                loadCollection(collection, dimension)
+                return@withLock
             }
-            return
+            loadCollection(collection, dimension)
         }
-        loadCollection(collection, dimension)
     }
 
     override suspend fun setPayload(collection: String, ids: List<String>, payload: Map<String, Any>) {
         if (ids.isEmpty()) return
-        val state = collections[collection] ?: return
-        db.prepareStatement("UPDATE vectors SET payload=? WHERE collection=? AND id=?").use { stmt ->
-            for (id in ids) {
-                val existing = state.payloads[id] ?: continue
-                val merged = existing + payload
-                state.payloads[id] = merged
-                stmt.setString(1, merged.toJson())
-                stmt.setString(2, collection)
-                stmt.setString(3, id)
-                stmt.addBatch()
+        mutex.withLock {
+            val state = collections[collection] ?: return@withLock
+            db.prepareStatement("UPDATE vectors SET payload=? WHERE collection=? AND id=?").use { stmt ->
+                for (id in ids) {
+                    val existing = state.payloads[id] ?: continue
+                    val merged = existing + payload
+                    state.payloads[id] = merged
+                    stmt.setString(1, merged.toJson())
+                    stmt.setString(2, collection)
+                    stmt.setString(3, id)
+                    stmt.addBatch()
+                }
+                stmt.executeBatch()
             }
-            stmt.executeBatch()
         }
     }
 
@@ -236,6 +252,26 @@ class JVectorStore(dataDir: File = File("data/vector")) : VectorStore {
             rebuildGraph(state)
             println("[Vicky] 从 SQLite 加载 '$collection': ${state.vectors.size} 条向量, 维度=$dimension")
         }
+    }
+
+    private fun compact(state: CollectionState, deletedIds: Set<String>) {
+        val newVectors = mutableListOf<FloatArray>()
+        val newIdToIndex = HashMap<String, Int>()
+        val newIndexToId = HashMap<Int, String>()
+        for ((id, oldIdx) in state.idToIndex) {
+            if (id in deletedIds) continue
+            val newIdx = newVectors.size
+            newVectors.add(state.vectors[oldIdx])
+            newIdToIndex[id] = newIdx
+            newIndexToId[newIdx] = id
+        }
+        state.vectors.clear()
+        state.vectors.addAll(newVectors)
+        state.idToIndex.clear()
+        state.idToIndex.putAll(newIdToIndex)
+        state.indexToId.clear()
+        state.indexToId.putAll(newIndexToId)
+        state.payloads.keys.removeAll(deletedIds)
     }
 
     private fun rebuildGraph(state: CollectionState) {

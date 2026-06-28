@@ -617,7 +617,30 @@ class ScriptEngine {
         override fun get(name: String, start: Scriptable): Any? {
             val method = suspendMethods[name]
             if (method != null) return createBridge(method)
-            return super.get(name, start)
+            val accessor = super.get(name, start)
+            // 方法调用器：包装返回值，使返回的 Java 对象若含 suspend 方法也能被代理
+            if (accessor is org.mozilla.javascript.Function) {
+                val proxy = this
+                return object : BaseFunction(parentScope ?: proxy, ScriptableObject.getFunctionPrototype(parentScope ?: proxy)) {
+                    override fun call(cx: Context, s: Scriptable, thisObj: Scriptable, args: Array<out Any?>): Any? {
+                        val result = accessor.call(cx, s, thisObj, args)
+                        return autoWrap(result)
+                    }
+                }
+            }
+            return accessor
+        }
+
+        private fun autoWrap(value: Any?): Any? {
+            if (value !is org.mozilla.javascript.NativeJavaObject) return value
+            val inner = value.unwrap() ?: return value
+            val suspends = mutableMapOf<String, java.lang.reflect.Method>()
+            for (m in inner.javaClass.methods) {
+                val p = m.parameterTypes
+                if (p.isNotEmpty() && p.last() == kotlin.coroutines.Continuation::class.java)
+                    suspends.putIfAbsent(m.name, m)
+            }
+            return if (suspends.isNotEmpty()) NativeJavaObjectProxy(parentScope ?: this, inner, suspends) else value
         }
 
         override fun has(name: String, start: Scriptable): Boolean =

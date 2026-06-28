@@ -78,6 +78,8 @@ fun main() = runBlocking {
     org.example.vicky.command.ScriptCommands.all(scriptsDir, agent.tools)
         .forEach { commandRegistry.register(it) }
 
+    agent.triggerInit()
+
     val consoleSink = MessageSink { out ->
         when (out) {
             is OutboundMessage.AgentReply -> println("[agent] ${out.content}")

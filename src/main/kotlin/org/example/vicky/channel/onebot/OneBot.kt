@@ -42,8 +42,9 @@ import org.example.vicky.memory.Distiller
 import org.example.vicky.memory.DistillationScheduler
 import org.example.vicky.memory.QdrantMemoryStore
 import org.example.vicky.memory.RawMemory
+import org.example.vicky.session.SessionStore
+import org.example.vicky.session.SqliteSessionStore
 import org.example.vicky.tool.ToolAuthorizer
-import org.example.vicky.vector.QdrantVectorStore
 import top.mrxiaom.overflow.BotBuilder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -53,11 +54,7 @@ import java.util.concurrent.atomic.AtomicLong
  */
 data class MemoryConfig(
     val embedding: EmbeddingConfig? = null,
-    val vectorStoreType: String = "jvector",
     val vectorStoreDataDir: String = "data/vector",
-    val qdrantHost: String? = null,
-    val qdrantGrpcPort: Int = 6334,
-    val qdrantHttpPort: Int = 6333,
     val memoryEnabled: Boolean = false,
     val memoryTopK: Int = 5,
     val memoryTokenBudget: Int = 800,
@@ -404,6 +401,10 @@ class OneBot(
         private val adminToolList: Set<String>,
     ) : Agent(config) {
 
+        override val sessionStore: SessionStore = SqliteSessionStore(
+            java.io.File(org.example.vicky.config.ConfigManager.getConfigDir(), "data")
+        )
+
         override val contextManager: ContextManager = DefaultContextManager(
             store = ConversationStore(
                 maxConversations = config.conversationStoreMaxConversations,
@@ -422,84 +423,64 @@ class OneBot(
         private var fileIndexService: FileIndexService? = null
         private var distillationScheduler: DistillationScheduler? = null
         private val memoryCircuitBreaker = org.example.vicky.vector.CircuitBreaker(failureThreshold = 3, cooldownMs = 120_000)
+        @Volatile private var memoryReady = false
 
         override fun initMemory() {
-            val embeddingClient = memConfig.embedding?.let { EmbeddingClientFactory.create(it) }
-            if (embeddingClient != null) {
-                val dimText = if (embeddingClient.dimension > 0) "维度: ${embeddingClient.dimension}" else "维度: 待首次调用确定"
-                println("[Vicky] 语义模型已加载（$dimText）")
-            }
+            val embeddingClient = memConfig.embedding?.let { EmbeddingClientFactory.create(it) } ?: return
+            val dimText = if (embeddingClient.dimension > 0) "维度: ${embeddingClient.dimension}" else "维度: 待首次调用确定"
+            println("[Vicky] 语义模型已加载（$dimText）")
 
-            if (embeddingClient != null) {
-                when (memConfig.vectorStoreType) {
-                    "qdrant" -> {
-                        if (memConfig.qdrantHost != null) {
-                            try {
-                                vectorStore = QdrantVectorStore(memConfig.qdrantHost, memConfig.qdrantHttpPort)
-                                println("[Vicky] 向量存储已连接 (Qdrant): ${memConfig.qdrantHost}:${memConfig.qdrantHttpPort}")
-                            } catch (e: Exception) {
-                                println("[Vicky] Qdrant 连接失败: ${e.message}")
-                                println("[Vicky] 记忆功能已禁用")
-                            }
-                        }
-                    }
-                    else -> {
-                        // 默认使用 JVector 内置向量存储
-                        val dataDir = java.io.File(memConfig.vectorStoreDataDir)
-                        vectorStore = org.example.vicky.vector.JVectorStore(dataDir)
-                        println("[Vicky] 向量存储已初始化 (JVector 内置): ${dataDir.absolutePath}")
-                    }
-                }
-            }
+            val dataDir = java.io.File(memConfig.vectorStoreDataDir)
+            vectorStore = org.example.vicky.vector.JVectorStore(dataDir)
+            println("[Vicky] 向量存储已初始化 (JVector): ${dataDir.absolutePath}")
 
-            if (vectorStore != null && embeddingClient != null) {
-                memoryStore = QdrantMemoryStore(
+            memoryStore = QdrantMemoryStore(
+                vectorStore!!, embeddingClient,
+                memConfig.memoryCollection, memConfig.memoryRawCollection,
+                memConfig.memoryRawRetentionDays.toLong(),
+                memConfig.memoryDistilledRetentionDays.toLong(),
+                memConfig.memoryExpiryDays.toLong(),
+            )
+
+            if (memConfig.fileIndexEnabled) {
+                fileIndexService = FileIndexService(
                     vectorStore!!, embeddingClient,
-                    memConfig.memoryCollection, memConfig.memoryRawCollection,
-                    memConfig.memoryRawRetentionDays.toLong(),
-                    memConfig.memoryDistilledRetentionDays.toLong(),
-                    memConfig.memoryExpiryDays.toLong(),
+                    java.io.File(System.getProperty("user.dir")),
+                    memConfig.fileIndexCollection,
+                    memConfig.fileIndexChunkSize,
+                    memConfig.fileIndexChunkOverlap,
+                    memConfig.fileIndexIgnorePatterns,
+                    memConfig.fileIndexPaths,
                 )
-                println("[Vicky] 记忆系统已启用（topK: ${memConfig.memoryTopK}, tokenBudget: ${memConfig.memoryTokenBudget}）")
-
-                if (memConfig.fileIndexEnabled) {
-                    fileIndexService = FileIndexService(
-                        vectorStore!!, embeddingClient,
-                        java.io.File(System.getProperty("user.dir")),
-                        memConfig.fileIndexCollection,
-                        memConfig.fileIndexChunkSize,
-                        memConfig.fileIndexChunkOverlap,
-                        memConfig.fileIndexIgnorePatterns,
-                        memConfig.fileIndexPaths,
-                    )
-                }
-
-                if (memConfig.distillationEnabled) {
-                    val openAi = org.example.vicky.llm.OpenAiClientFactory.create(config)
-                    val distiller = Distiller(openAi, embeddingClient, config.model)
-                    distillationScheduler = DistillationScheduler(memoryStore!!, distiller, memConfig.distillationMaxConversations, true)
-                }
             }
 
-            // 启动时后台自动索引文件
-            if (fileIndexService != null && memConfig.fileIndexAutoIndexOnStart) {
-                println("[Vicky] 开始后台索引文件...")
-                scope.launch(Dispatchers.IO) {
-                    try {
-                        val result = fileIndexService!!.indexAll { current, success, skipped ->
-                            print("\r[Vicky] 索引中: 已处理 $current 个文件，$success 个已索引，$skipped 个已跳过")
+            if (memConfig.distillationEnabled) {
+                val openAi = org.example.vicky.llm.OpenAiClientFactory.create(config)
+                val distiller = Distiller(openAi, embeddingClient, config.model)
+                distillationScheduler = DistillationScheduler(memoryStore!!, distiller, memConfig.distillationMaxConversations, true)
+            }
+
+            println("[Vicky] 记忆系统后台初始化中，完成前记忆功能禁用...")
+            scope.launch(Dispatchers.IO) {
+                try {
+                    embeddingClient.embed("warmup")
+                    memoryReady = true
+                    println("[Vicky] 记忆系统已就绪（topK: ${memConfig.memoryTopK}, tokenBudget: ${memConfig.memoryTokenBudget}）")
+                    distillationScheduler?.also { it.start(); println("[Vicky] 蒸馏调度器已启动") }
+                    if (fileIndexService != null && memConfig.fileIndexAutoIndexOnStart) {
+                        println("[Vicky] 开始后台索引文件...")
+                        try {
+                            val result = fileIndexService!!.indexAll { current, success, skipped ->
+                                print("\r[Vicky] 索引中: 已处理 $current 个文件，$success 个已索引，$skipped 个已跳过")
+                            }
+                            println("\n[Vicky] 文件索引完成: ${result.newFiles} 个新增，${result.updatedFiles} 个更新，${result.skippedFiles} 个跳过")
+                        } catch (e: Exception) {
+                            println("\n[Vicky] 文件索引失败: ${e.message}")
                         }
-                        println("\n[Vicky] 文件索引完成: ${result.newFiles} 个新增，${result.updatedFiles} 个更新，${result.skippedFiles} 个跳过")
-                    } catch (e: Exception) {
-                        println("\n[Vicky] 文件索引失败: ${e.message}")
                     }
+                } catch (e: Exception) {
+                    println("[Vicky] 记忆系统初始化失败: ${e.message}")
                 }
-            }
-
-            // 启动蒸馏调度器
-            if (distillationScheduler != null) {
-                distillationScheduler!!.start()
-                println("[Vicky] 蒸馏调度器已启动")
             }
         }
 
@@ -555,10 +536,10 @@ class OneBot(
         }
 
         override suspend fun onTurnStart(msg: InboundMessage, history: MutableList<ChatMessage>) {
-            if (memoryStore == null || !memConfig.memoryEnabled) return
+            if (memoryStore == null || !memConfig.memoryEnabled || !memoryReady) return
             if (!memoryCircuitBreaker.allowRequest()) return
             try {
-                val memories = kotlinx.coroutines.withTimeout(5_000) {
+                val memories = kotlinx.coroutines.withTimeout(30_000) {
                     memoryStore!!.recall(msg.content, msg.userId, memConfig.memoryTopK)
                 }
                 memoryCircuitBreaker.recordSuccess()
@@ -588,10 +569,10 @@ class OneBot(
         }
 
         override suspend fun onTurnEnd(msg: InboundMessage, assistantReply: String?) {
-            if (memoryStore == null || !memConfig.memoryEnabled) return
+            if (memoryStore == null || !memConfig.memoryEnabled || !memoryReady) return
             if (!memoryCircuitBreaker.allowRequest()) return
             try {
-                kotlinx.coroutines.withTimeout(5_000) {
+                kotlinx.coroutines.withTimeout(30_000) {
                     val rawMemories = mutableListOf<RawMemory>()
                     rawMemories.add(RawMemory(userId = msg.userId, conversationId = msg.conversationId, role = "user", content = msg.content))
                     if (assistantReply != null) {

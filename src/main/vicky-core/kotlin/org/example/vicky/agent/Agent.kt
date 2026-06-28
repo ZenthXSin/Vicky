@@ -17,6 +17,8 @@ import org.example.vicky.io.InboundMessage
 import org.example.vicky.io.MessageSink
 import org.example.vicky.io.OutboundMessage
 import org.example.vicky.llm.OpenAiClientFactory
+import org.example.vicky.session.Session
+import org.example.vicky.session.SessionStore
 import org.example.vicky.tool.Tool
 import org.example.vicky.tool.ToolAuthorizer
 import org.example.vicky.tool.ToolContext
@@ -39,8 +41,10 @@ abstract class Agent(
     val name: String? get() = config.name
     private var cachedOaiTools: List<OAITool>? = null
 
+    open val sessionStore: SessionStore? = null
+
     private var memoryInitialized = false
-    private val conversationMutexes = ConcurrentHashMap<String, Mutex>()
+    private val sessions = ConcurrentHashMap<String, Session>()
 
     init {
         AgentManager.register(this)
@@ -58,6 +62,13 @@ abstract class Agent(
 
     /** 子类 override 以初始化记忆系统（向量存储、Embedding 等）。在 initTools() 之前调用。 */
     protected open fun initMemory() {}
+
+    fun triggerInit() {
+        if (!memoryInitialized) {
+            memoryInitialized = true
+            initMemory()
+        }
+    }
 
     /** 子类 override 以注册内置工具。默认无操作。 */
     protected open fun initTools() {}
@@ -89,6 +100,9 @@ abstract class Agent(
         return result
     }
 
+    fun session(conversationId: String): Session =
+        sessions.getOrPut(conversationId) { Session(conversationId, sessionStore, this) }
+
     /**
      * 入口：外部把收到的消息丢进来。
      * 同一 conversationId 串行执行，避免并发修改 history。
@@ -97,14 +111,9 @@ abstract class Agent(
         msg: InboundMessage,
         replySink: MessageSink? = null,
         clearContextAfter: Boolean = false,
-    ) {
-        val mutex = conversationMutexes.getOrPut(msg.conversationId) { Mutex() }
-        mutex.withLock {
-            receiveInternal(msg, replySink, clearContextAfter)
-        }
-    }
+    ) = session(msg.conversationId).receive(msg, replySink, clearContextAfter)
 
-    private suspend fun receiveInternal(
+    internal suspend fun receiveInternal(
         msg: InboundMessage,
         replySink: MessageSink?,
         clearContextAfter: Boolean,
@@ -114,6 +123,16 @@ abstract class Agent(
             initMemory()
         }
         val history = contextManager.history(msg.conversationId)
+
+        // 从持久化存储恢复历史（首次访问）
+        val sess = session(msg.conversationId)
+        if (!sess.historyLoaded) {
+            sess.historyLoaded = true
+            val persisted = sess.loadHistory()
+            if (persisted.isNotEmpty() && history.isEmpty()) {
+                history.addAll(persisted)
+            }
+        }
 
         // 确保 system prompt 存在且为最新
         val prompt = contextManager.buildSystemPrompt(config.mode, tools)
@@ -269,9 +288,12 @@ abstract class Agent(
 
             if (clearContextAfter) {
                 contextManager.clear(msg.conversationId)
+                session(msg.conversationId).delete()
+                sessions.remove(msg.conversationId)
                 log("cleared context for '${msg.conversationId}' after reply")
             } else {
                 contextManager.trimIfNeeded(msg.conversationId)
+                session(msg.conversationId).flush(history)
             }
         }
     }
