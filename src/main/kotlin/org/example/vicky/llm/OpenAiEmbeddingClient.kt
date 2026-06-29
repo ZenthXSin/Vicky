@@ -3,6 +3,7 @@ package org.example.vicky.llm
 import io.ktor.client.*
 import io.ktor.client.call.*
 import io.ktor.client.engine.okhttp.*
+import io.ktor.client.plugins.*
 import io.ktor.client.plugins.contentnegotiation.*
 import io.ktor.client.request.*
 import io.ktor.http.*
@@ -21,6 +22,10 @@ class OpenAiEmbeddingClient(private val config: EmbeddingConfig) : EmbeddingClie
 
     private val client = HttpClient(OkHttp) {
         install(ContentNegotiation) { json(json) }
+        install(HttpTimeout) {
+            requestTimeoutMillis = 60_000
+            socketTimeoutMillis = 60_000
+        }
     }
 
     @Serializable
