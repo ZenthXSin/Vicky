@@ -1,62 +1,54 @@
 package org.example.vicky.llm
 
-import com.aallam.openai.api.embedding.EmbeddingRequest
-import com.aallam.openai.api.http.Timeout
-import com.aallam.openai.api.logging.LogLevel
-import com.aallam.openai.client.LoggingConfig
-import com.aallam.openai.api.model.ModelId
-import com.aallam.openai.client.OpenAI
-import com.aallam.openai.client.OpenAIConfig
-import com.aallam.openai.client.OpenAIHost
+import io.ktor.client.*
+import io.ktor.client.call.*
+import io.ktor.client.engine.okhttp.*
+import io.ktor.client.plugins.contentnegotiation.*
+import io.ktor.client.request.*
+import io.ktor.http.*
+import io.ktor.serialization.kotlinx.json.*
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 import org.example.vicky.agent.EmbeddingConfig
-import kotlin.time.Duration.Companion.seconds
 
-/**
- * 外置 embedding：走 OpenAI 协议兼容端点。
- *
- * 与主 LLM 的 [OpenAiClientFactory] 解耦——baseUrl/apiKey 各自配置，互不污染。
- */
 class OpenAiEmbeddingClient(private val config: EmbeddingConfig) : EmbeddingClient {
 
     @Volatile
     override var dimension: Int = -1
         private set
 
-    private val client: OpenAI = run {
-        // OpenAIHost 用 baseUrl 解析相对路径，必须以 '/' 结尾
-        val normalized = if (config.baseUrl.endsWith("/")) config.baseUrl else "${config.baseUrl}/"
-        OpenAI(
-            OpenAIConfig(
-                token = config.apiKey,
-                timeout = Timeout(socket = 60.seconds),
-                host = OpenAIHost(baseUrl = normalized),
-                logging = LoggingConfig(logLevel = LogLevel.None),
-            )
-        )
+    private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+
+    private val client = HttpClient(OkHttp) {
+        install(ContentNegotiation) { json(json) }
     }
+
+    @Serializable
+    private data class Req(val model: String, val input: List<String>)
+
+    @Serializable
+    private data class EmbData(val embedding: List<Double>)
+
+    @Serializable
+    private data class Resp(val data: List<EmbData>)
 
     override suspend fun embed(texts: List<String>): List<FloatArray> {
         if (texts.isEmpty()) return emptyList()
-        val resp = client.embeddings(
-            EmbeddingRequest(
-                model = ModelId(config.model),
-                input = texts,
-            )
-        )
-        val vectors = resp.embeddings.map { it.embedding.toFloatArray() }
-        // 防御：embedding 端点协议不兼容时可能返回空响应或零长度向量，
-        // 静默写入会导致 Qdrant 存 payload 但不建向量索引，搜索全空。提前抛错好定位。
+        val base = if (config.baseUrl.endsWith("/")) config.baseUrl else "${config.baseUrl}/"
+        val resp = client.post("${base}embeddings") {
+            contentType(ContentType.Application.Json)
+            header(HttpHeaders.Authorization, "Bearer ${config.apiKey}")
+            setBody(Req(config.model, texts))
+        }.body<Resp>()
+        val vectors = resp.data.map { it.embedding.toFloatArray() }
         check(vectors.size == texts.size) {
-            "Embedding endpoint returned ${vectors.size} vectors for ${texts.size} inputs (model=${config.model}, baseUrl=${config.baseUrl}). 端点协议可能不兼容。"
+            "Embedding endpoint returned ${vectors.size} vectors for ${texts.size} inputs (model=${config.model}, baseUrl=${config.baseUrl})"
         }
         val firstEmpty = vectors.indexOfFirst { it.isEmpty() }
-        check(firstEmpty < 0) {
-            "Embedding endpoint returned empty vector at index $firstEmpty (model=${config.model}). 端点协议可能不兼容。"
-        }
+        check(firstEmpty < 0) { "Embedding endpoint returned empty vector at index $firstEmpty" }
         if (dimension == -1) dimension = vectors[0].size
         return vectors
     }
 
-    private fun List<Double>.toFloatArray(): FloatArray =
-        FloatArray(size) { this[it].toFloat() }
+    private fun List<Double>.toFloatArray() = FloatArray(size) { this[it].toFloat() }
 }
