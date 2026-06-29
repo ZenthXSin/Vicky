@@ -182,8 +182,8 @@ class FileIndexService(
         val chunks = splitIntoChunks(content)
         if (chunks.isEmpty()) return 0
 
-        // 批量 embedding，每批最多 32 条，避免请求过大
-        val texts = chunks.map { it.first }
+        val maxChars = 1000
+        val texts = chunks.map { it.first.take(maxChars) }
         val batchSize = 4
         val vectors = mutableListOf<FloatArray>()
         for (i in texts.indices step batchSize) {
