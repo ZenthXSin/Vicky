@@ -131,6 +131,7 @@ class OneBot(
         val scriptsDir = java.io.File(org.example.vicky.config.ConfigManager.getConfigDir(), "scripts")
         org.example.vicky.command.ScriptCommands.all(scriptsDir, agent.tools)
             .forEach { commandRegistry.register(it) }
+        commandRegistry.register(org.example.vicky.command.ContextInfoCommand.create(agent))
         registerListeners()
         return true
     }
@@ -657,6 +658,7 @@ class OneBot(
                 }
                 is OutboundMessage.Debug -> { println("DEBUG: ${out.content}") }
                 is OutboundMessage.Think -> { println("THINK: ${out.content}") }
+                is OutboundMessage.TokenUsage -> { println("[llm] ${out.content}") }
             }
         }
 

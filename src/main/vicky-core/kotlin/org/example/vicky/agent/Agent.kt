@@ -103,6 +103,12 @@ abstract class Agent(
     fun session(conversationId: String): Session =
         sessions.getOrPut(conversationId) { Session(conversationId, sessionStore, this) }
 
+    suspend fun clearContext(conversationId: String) {
+        contextManager.clear(conversationId)
+        session(conversationId).delete()
+        sessions.remove(conversationId)
+    }
+
     /**
      * 入口：外部把收到的消息丢进来。
      * 同一 conversationId 串行执行，避免并发修改 history。
@@ -170,14 +176,19 @@ abstract class Agent(
 
         try {
             repeat(config.maxSteps) { step ->
-                log("step ${step + 1}/${config.maxSteps} -> requesting completion (${history.size} msgs)")
+                val ctxEstimate = history.sumOf { (it.content ?: "").length } / 3
+                log("step ${step + 1}/${config.maxSteps} -> requesting completion (${history.size} msgs, ~${ctxEstimate}tk in)")
                 val request = ChatCompletionRequest(
                     model = config.model,
                     messages = history.toList(),
                     tools = oaiTools.takeIf { it.isNotEmpty() },
                     temperature = config.temperature,
                 )
-                val assistant = completeChat(request, onDebug = if (config.debug) { s -> log(s) } else null)
+                val cr = completeChat(request, onDebug = if (config.debug) { s -> log(s) } else null)
+                sess.contextTokens += cr.promptTokens
+                sess.usedTokens += cr.completionTokens
+                emit(OutboundMessage.TokenUsage(msg.conversationId, msg.userId, msg.groupId, cr.promptTokens, cr.completionTokens, sess.usedTokens))
+                val assistant = cr.message
                 history += assistant
 
                 var calls = assistant.toolCalls.orEmpty()
@@ -253,7 +264,7 @@ abstract class Agent(
             )
             history += wrapUpPrompt
             wrapUpMessage = wrapUpPrompt
-            val wrapUp = completeChat(
+            val wrapUpCr = completeChat(
                 ChatCompletionRequest(
                     model = config.model,
                     messages = history.toList(),
@@ -261,6 +272,10 @@ abstract class Agent(
                 ),
                 onDebug = if (config.debug) { s -> log(s) } else null,
             )
+            sess.contextTokens += wrapUpCr.promptTokens
+            sess.usedTokens += wrapUpCr.completionTokens
+            emit(OutboundMessage.TokenUsage(msg.conversationId, msg.userId, msg.groupId, wrapUpCr.promptTokens, wrapUpCr.completionTokens, sess.usedTokens))
+            val wrapUp = wrapUpCr.message
             history += wrapUp
             assistantReply = wrapUp.content
             wrapUp.content?.takeIf { it.isNotBlank() }?.let {
@@ -321,7 +336,7 @@ abstract class Agent(
     private suspend fun completeChat(
         request: ChatCompletionRequest,
         onDebug: (suspend (String) -> Unit)? = null,
-    ): ChatMessage {
+    ): CompletionResult {
         val timeoutMs = config.llmTimeoutMs
         val maxRetries = config.llmMaxRetries
         var lastException: Throwable? = null
@@ -346,9 +361,14 @@ abstract class Agent(
     private suspend fun completeChatOnce(
         request: ChatCompletionRequest,
         onDebug: (suspend (String) -> Unit)? = null,
-    ): ChatMessage {
+    ): CompletionResult {
         if (!config.streaming) {
-            return openAi.chatCompletion(request).choices.first().message
+            val completion = openAi.chatCompletion(request)
+            return CompletionResult(
+                message = completion.choices.first().message,
+                promptTokens = completion.usage?.promptTokens ?: 0,
+                completionTokens = completion.usage?.completionTokens ?: 0,
+            )
         }
         val contentBuf = StringBuilder()
         // toolCall 累积：index -> (id, name, argumentsBuf)
@@ -359,9 +379,18 @@ abstract class Agent(
         var contentChunkCount = 0
         var toolChunkCount = 0
         var finishReason: String? = null
+        var streamPromptTokens = 0
+        var streamCompletionTokens = 0
+        val streamRequest = request.copy(
+            streamOptions = com.aallam.openai.api.chat.StreamOptions(includeUsage = true),
+        )
         try {
-            openAi.chatCompletions(request).collect { chunk ->
+            openAi.chatCompletions(streamRequest).collect { chunk ->
                 chunkCount++
+                chunk.usage?.let {
+                    streamPromptTokens = it.promptTokens ?: 0
+                    streamCompletionTokens = it.completionTokens ?: 0
+                }
                 val choice = chunk.choices.firstOrNull() ?: return@collect
                 choice.finishReason?.let { finishReason = it.value }
                 val delta = choice.delta ?: return@collect
@@ -412,10 +441,14 @@ abstract class Agent(
                 ),
             )
         }
-        return ChatMessage(
-            role = role,
-            content = contentBuf.toString().ifEmpty { null },
-            toolCalls = builtToolCalls.ifEmpty { null },
+        return CompletionResult(
+            message = ChatMessage(
+                role = role,
+                content = contentBuf.toString().ifEmpty { null },
+                toolCalls = builtToolCalls.ifEmpty { null },
+            ),
+            promptTokens = streamPromptTokens,
+            completionTokens = streamCompletionTokens,
         )
     }
 
@@ -479,9 +512,114 @@ abstract class Agent(
         return results
     }
 
+    fun contextReport(conversationId: String): String {
+        val history = contextManager.history(conversationId)
+        val charsPerToken = 3
+        var systemChars = 0
+        var summaryChars = 0
+        var chatChars = 0
+        var toolCallChars = 0
+        var toolResultChars = 0
+        var chatMsgCount = 0
+        var toolRounds = 0
+        var systemBreakdown: List<Pair<String, Int>> = emptyList()
+
+        for (msg in history) {
+            when (msg.role) {
+                ChatRole.System -> {
+                    val content = msg.content ?: ""
+                    if (content.startsWith("[context-summary]")) {
+                        summaryChars += content.length
+                    } else {
+                        systemChars += content.length
+                        if (systemBreakdown.isEmpty()) systemBreakdown = breakdownSystemPrompt(content)
+                    }
+                }
+                ChatRole.User -> { chatChars += (msg.content ?: "").length; chatMsgCount++ }
+                ChatRole.Assistant -> {
+                    val contentLen = (msg.content ?: "").length
+                    val toolLen = msg.toolCalls?.sumOf { tc ->
+                        when (tc) {
+                            is ToolCall.Function -> (tc.function.argumentsOrNull?.length ?: 0) + (tc.function.nameOrNull?.length ?: 0)
+                            else -> 0
+                        }
+                    } ?: 0
+                    if (msg.toolCalls.isNullOrEmpty()) {
+                        chatChars += contentLen
+                    } else {
+                        toolCallChars += contentLen + toolLen
+                        toolRounds++
+                    }
+                }
+                ChatRole.Tool -> toolResultChars += (msg.content ?: "").length
+                else -> {}
+            }
+        }
+
+        val toolSchemaChars = tools.snapshot().sumOf { t ->
+            t.name.length + t.description.length + t.parameters.toString().length
+        }
+
+        val parts = listOf(
+            "系统提示词" to systemChars,
+            "上下文摘要" to summaryChars,
+            "对话历史" to chatChars,
+            "工具调用" to toolCallChars,
+            "工具结果" to toolResultChars,
+            "工具Schema" to toolSchemaChars,
+        )
+        val totalTk = parts.sumOf { it.second } / charsPerToken
+        val sess = sessions[conversationId]
+
+        return buildString {
+            appendLine("=== 上下文占用 [$conversationId] ===")
+            appendLine("消息: ${history.size} 条  工具轮次: $toolRounds  对话轮: $chatMsgCount")
+            appendLine()
+            for ((label, chars) in parts) {
+                if (chars == 0) continue
+                val tk = chars / charsPerToken
+                val pct = if (totalTk > 0) tk * 100 / totalTk else 0
+                appendLine("%-10s %5d tk  %3d%%".format(label, tk, pct))
+                if (label == "系统提示词" && systemBreakdown.isNotEmpty()) {
+                    for ((subLabel, subChars) in systemBreakdown) {
+                        if (subChars > 0)
+                            appendLine("  %-9s %5d tk".format("└$subLabel", subChars / charsPerToken))
+                    }
+                }
+            }
+            appendLine()
+            append("合计: ~$totalTk tk (字符估算，非API实际值)")
+            if (sess != null) {
+                appendLine()
+                append("本轮: →${sess.contextTokens}tk 传入 / ←${sess.usedTokens}tk 输出")
+            }
+        }.trimEnd()
+    }
+
+    private fun breakdownSystemPrompt(prompt: String): List<Pair<String, Int>> {
+        val sectionRegex = Regex("(?=\\n\\n# )")
+        val sections = prompt.split(sectionRegex)
+        return sections.map { section ->
+            val label = when {
+                section.contains("# Security") -> "安全防护"
+                section.contains("# Output") -> "输出规则"
+                section.contains("# Tool Usage") -> "工具指南"
+                section.contains("# Available Skills") -> "技能列表"
+                else -> "人设指令"
+            }
+            label to section.length
+        }
+    }
+
     override fun close() {
         AgentManager.unregister(id)
     }
+
+    private data class CompletionResult(
+        val message: ChatMessage,
+        val promptTokens: Int = 0,
+        val completionTokens: Int = 0,
+    )
 
     private companion object {
         /** 工具结果最大字符数，超出截断。 */

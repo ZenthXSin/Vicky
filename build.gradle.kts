@@ -107,6 +107,11 @@ tasks.shadowJar {
 tasks.matching { it.name in setOf("startShadowScripts", "shadowDistTar", "shadowDistZip") }
     .configureEach { enabled = false }
 
+// application 插件的 distTar/distZip/startScripts 会使用 shadowJar 的输出，
+// 必须显式声明依赖，否则 Gradle 9 的严格任务依赖校验会报错。
+tasks.matching { it.name in setOf("distTar", "distZip", "startScripts") }
+    .configureEach { dependsOn(tasks.shadowJar) }
+
 tasks.build {
     dependsOn(tasks.shadowJar)
 }

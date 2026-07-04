@@ -14,6 +14,8 @@ class Session(
 ) {
     val mutex = Mutex()
     @Volatile var historyLoaded = false
+    @Volatile var contextTokens: Int = 0
+    @Volatile var usedTokens: Int = 0
 
     suspend fun receive(
         msg: InboundMessage,

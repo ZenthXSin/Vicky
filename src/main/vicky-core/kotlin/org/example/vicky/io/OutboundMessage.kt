@@ -39,4 +39,15 @@ sealed interface OutboundMessage {
         override val content: String,
         override val type: String = "Think",
     ) : OutboundMessage
+
+    data class TokenUsage(
+        override val conversationId: String,
+        override val userId: String,
+        override val groupId: String = "",
+        val promptTokens: Int,
+        val completionTokens: Int,
+        val sessionTotalUsed: Int,
+        override val content: String = "→llm ${promptTokens}tk  ←llm ${completionTokens}tk  累计${sessionTotalUsed}tk",
+        override val type: String = "TokenUsage",
+    ) : OutboundMessage
 }

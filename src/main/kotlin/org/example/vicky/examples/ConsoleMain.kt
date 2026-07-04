@@ -77,6 +77,7 @@ fun main() = runBlocking {
     val scriptsDir = java.io.File(ConfigManager.getConfigDir(), "scripts")
     org.example.vicky.command.ScriptCommands.all(scriptsDir, agent.tools)
         .forEach { commandRegistry.register(it) }
+    commandRegistry.register(org.example.vicky.command.ContextInfoCommand.create(agent))
 
     agent.triggerInit()
 
@@ -86,6 +87,7 @@ fun main() = runBlocking {
             is OutboundMessage.ToolReply -> println("[tool:${out.toolName}] ${out.content}")
             is OutboundMessage.Debug -> println("[debug] ${out.content}")
             is OutboundMessage.Think -> println("[think] ${out.content}")
+            is OutboundMessage.TokenUsage -> println("[llm] ${out.content}")
         }
     }
 
