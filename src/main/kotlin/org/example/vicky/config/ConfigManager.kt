@@ -29,6 +29,7 @@ data class ConfigData(
     val think: Boolean = false,
     val streaming: Boolean = true,
     val builtinTools: Boolean = true,
+    val lazyToolSchema: Boolean = true,
     val toolStates: Map<String, Boolean> = emptyMap(),
     val skillStates: Map<String, Boolean> = emptyMap(),
     val embedding: EmbeddingConfigData = EmbeddingConfigData(),
@@ -144,8 +145,10 @@ object ConfigManager {
 
         val agentMdFile = File(configDir, configData.agentMd)
         val agentMdContent = if (agentMdFile.exists()) {
+            println("[Vicky] agentMd: ${agentMdFile.absolutePath}")
             agentMdFile.readText(Charsets.UTF_8)
         } else {
+            println("[Vicky] agentMd: 文件不存在 (${agentMdFile.absolutePath})，使用内置默认")
             getDefaultAgentMd()
         }
 
@@ -298,6 +301,7 @@ object ConfigManager {
             think = configData.think,
             streaming = configData.streaming,
             builtinTools = configData.builtinTools,
+            lazyToolSchema = configData.lazyToolSchema,
             toolStates = configData.toolStates,
             conversationStoreMaxConversations = memory.conversationStoreMaxConversations,
             conversationStoreMaxMessages = memory.conversationStoreMaxMessages,

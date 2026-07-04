@@ -35,16 +35,28 @@ class DefaultContextManager(
         val cutoff = roundStarts[roundStarts.size - KEEP_RECENT_TOOL_ROUNDS]
         for (i in 0 until cutoff) {
             val m = history[i]
-            if (m.role != ChatRole.Tool) continue
-            val original = m.content ?: continue
-            if (original.startsWith(SUMMARY_PREFIX)) continue
-            val status = if (original.trimStart().startsWith("Error")) "failed" else "ok"
-            history[i] = ChatMessage(
-                role = ChatRole.Tool,
-                toolCallId = m.toolCallId,
-                name = m.name,
-                content = "$SUMMARY_PREFIX${m.name ?: "tool"}: $status",
-            )
+            when {
+                m.role == ChatRole.Tool -> {
+                    val original = m.content ?: continue
+                    if (original.startsWith(SUMMARY_PREFIX)) continue
+                    val status = if (original.trimStart().startsWith("Error")) "failed" else "ok"
+                    history[i] = ChatMessage(
+                        role = ChatRole.Tool,
+                        toolCallId = m.toolCallId,
+                        name = m.name,
+                        content = "$SUMMARY_PREFIX${m.name ?: "tool"}: $status",
+                    )
+                }
+                m.role == ChatRole.Assistant && !m.toolCalls.isNullOrEmpty() -> {
+                    val names = m.toolCalls!!.mapNotNull {
+                        (it as? com.aallam.openai.api.chat.ToolCall.Function)?.function?.nameOrNull
+                    }.joinToString(", ")
+                    history[i] = ChatMessage(
+                        role = ChatRole.Assistant,
+                        content = "$SUMMARY_PREFIX called: $names",
+                    )
+                }
+            }
         }
     }
 

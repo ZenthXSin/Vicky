@@ -1,5 +1,6 @@
 package org.example.vicky.command
 
+import org.example.vicky.command.CommandRegistry
 import org.example.vicky.script.ScriptManager
 import org.example.vicky.tool.ToolRegistry
 import java.io.File
@@ -9,7 +10,7 @@ import java.io.File
  */
 object ScriptCommands {
 
-    fun all(scriptsDir: File, toolRegistry: ToolRegistry): List<Command> = listOf(
+    fun all(scriptsDir: File, toolRegistry: ToolRegistry, commandRegistry: CommandRegistry? = null): List<Command> = listOf(
         command(
             name = "script",
             description = "脚本管理: /script load|reload|enable|disable|list",
@@ -25,7 +26,7 @@ object ScriptCommands {
                     val file = resolveScriptFile(scriptsDir, target)
                         ?: return@command CommandResult(reply = "未找到脚本: $target")
                     try {
-                        val bridge = ScriptManager.loadAndRegister(file, toolRegistry)
+                        val bridge = ScriptManager.loadAndRegister(file, toolRegistry, commandRegistry)
                         CommandResult(reply = "已加载: ${bridge.name}")
                     } catch (e: Exception) {
                         CommandResult(reply = "加载失败: ${e.message}")
@@ -37,7 +38,7 @@ object ScriptCommands {
                     val file = resolveScriptFile(scriptsDir, target)
                         ?: return@command CommandResult(reply = "未找到脚本: $target")
                     try {
-                        ScriptManager.reloadScript(file, toolRegistry)
+                        ScriptManager.reloadScript(file, toolRegistry, commandRegistry)
                         CommandResult(reply = "已重载: ${file.nameWithoutExtension}")
                     } catch (e: Exception) {
                         CommandResult(reply = "重载失败: ${e.message}")
@@ -49,7 +50,7 @@ object ScriptCommands {
                     val file = resolveScriptFile(scriptsDir, target)
                         ?: return@command CommandResult(reply = "未找到脚本: $target")
                     try {
-                        ScriptManager.loadAndRegister(file, toolRegistry)
+                        ScriptManager.loadAndRegister(file, toolRegistry, commandRegistry)
                         CommandResult(reply = "已启用: ${file.nameWithoutExtension}")
                     } catch (e: Exception) {
                         CommandResult(reply = "启用失败: ${e.message}")
@@ -63,7 +64,7 @@ object ScriptCommands {
                         key.removeSuffix(".ts") == query || bridge.name == query
                     }
                     if (entry == null) return@command CommandResult(reply = "未找到已加载的脚本: $query")
-                    ScriptManager.unloadScript(entry.key, toolRegistry)
+                    ScriptManager.unloadScript(entry.key, toolRegistry, commandRegistry)
                     CommandResult(reply = "已禁用: ${entry.value.name}")
                 }
 

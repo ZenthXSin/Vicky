@@ -27,11 +27,11 @@ data class ScriptExports(
     val executeFn: Any?,
     val onLoadFn: Any? = null,
     val onUnloadFn: Any? = null,
+    val commandsDef: List<Any?> = emptyList(),
     val fileName: String,
     val rhinoScope: ScriptableObject? = null,
     val rhinoContext: Context? = null,
     @Volatile var loaded: Boolean = false,
     @Volatile var loading: Boolean = false,
-    /** 脚本级别的协程作用域，卸载时自动取消所有子协程。 */
     val coroutineScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 )

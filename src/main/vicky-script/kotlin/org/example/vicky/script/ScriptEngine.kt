@@ -138,6 +138,11 @@ class ScriptEngine {
                 .takeIf { it != null && it != Undefined.instance }
             val onUnloadFn = ScriptableObject.getProperty(result, "onUnload")
                 .takeIf { it != null && it != Undefined.instance }
+            val commandsRaw = ScriptableObject.getProperty(result, "commands")
+                .takeIf { it != null && it != Undefined.instance }
+            val commandsDef: List<Any?> = if (commandsRaw is org.mozilla.javascript.NativeArray) {
+                (0 until commandsRaw.length).map { commandsRaw.get(it.toInt(), commandsRaw) }
+            } else emptyList()
 
             // execute 和 onLoad 都是可选的，脚本可以只跑顶层代码
 
@@ -148,6 +153,7 @@ class ScriptEngine {
                 executeFn = executeFn,
                 onLoadFn = onLoadFn,
                 onUnloadFn = onUnloadFn,
+                commandsDef = commandsDef,
                 fileName = fileName,
                 rhinoScope = scope,
                 rhinoContext = ctx,
