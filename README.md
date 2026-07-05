@@ -16,7 +16,7 @@
 
 ## 模块结构
 
-项目由三个独立模块 + 一个根应用组成：
+项目由四个独立模块 + 一个根应用组成：
 
 ```
 src/main/
@@ -44,6 +44,16 @@ src/main/
 │   │   └── ScriptConfig.kt          # 配置模型
 │   └── resources/
 │       └── typescript.js            # 内嵌 TypeScript 4.9.5 编译器
+│
+├── vicky-vibe/          # 单轮自适应编排 / Code CLI（当前仓库内模块）
+│   └── kotlin/org/example/vicky/vibe/
+│       ├── agent/           # VibeAgent + 专用 ContextManager
+│       ├── engine/          # 单轮 message pipeline
+│       ├── orchestrator/    # VibeOrchestrator / system prompt / 结果适配
+│       ├── status/          # 状态面板、观察者、快照
+│       ├── task/            # 任务图与任务状态
+│       ├── tool/            # tool use queue / tool use result
+│       └── turn/            # turn request / runner / result
 │
 └── kotlin/org/example/vicky/    # 根应用（OneBot 机器人 + 内置工具实现）
     ├── agent/EmbeddingConfig.kt
@@ -258,9 +268,42 @@ var content = Files.readString(f.toPath());
 
 根应用提供 `manage_scripts` 工具，Agent 可按需加载/卸载/重载脚本。启动时自动加载所有 `.ts` 文件。
 
-### 上下文管理
+### Vibe 编排与 Code CLI（vicky-vibe）
 
-- **自动拼接上下文**：每轮重建 system prompt = `agentMd` + 内置安全防护 + 模式说明 + 可用工具摘要 + 记忆。
+`vicky-vibe` 提供一个更接近 Claude Code / Kode 风格的单轮自适应编排内核，不再依赖固定多阶段 JSON 输出流水线，而是围绕一轮 turn 内的 message history、tool calling、tool result 回灌和收尾总结来运行。
+
+**当前能力：**
+- **单轮 adaptive loop**：一次请求内动态决定“思考 → 调工具 → 基于结果继续推进 → 收尾”。
+- **连续对话**：`conversationId` 驱动上下文复用，可关闭 `resetContextEachTurn` 形成持续会话。
+- **可嵌入 orchestrator API**：外部项目可直接复用 `VibeOrchestrator`、`VibeTurnRunner`、`VibeSystemPromptBuilder`。
+- **过程消息流**：通过 `MessageSink` 输出 `AgentReply` / `ToolReply` / `Debug` / `Think` / `TokenUsage`，可自行渲染成终端 UI、聊天 UI 或状态栏。
+- **任务流**：工具调用会写入 `TaskGraph`，便于在 CLI 或宿主应用展示进行中的步骤。
+
+**核心入口：**
+- `org.example.vicky.vibe.orchestrator.VibeOrchestrator`
+- `org.example.vicky.vibe.turn.VibeTurnRunner`
+- `org.example.vicky.vibe.orchestrator.VibeSystemPromptBuilder`
+- `org.example.vicky.examples.VibeCodeCliMain`
+
+**适合的使用方式：**
+- 在现有机器人/服务里嵌入一个 code agent 回合执行器
+- 复用 Vicky 的工具系统做交互式终端或 IDE 助手
+- 在别的 JVM 项目里直接接入连续对话 + 工具调用 + 状态流
+
+
+### Vibe Code CLI 示例
+
+仓库内提供 `org.example.vicky.examples.VibeCodeCliMain` 作为交互式 code CLI 示例，直接复用当前 `config.json` 与 `agentMd` 配置。
+
+**特性：**
+- 多行输入，空行发送
+- `/help`、`/clear`、`/status`、`/exit` 命令
+- 持续对话（默认复用同一 `conversationId`）
+- 实时显示思考、工具、任务和 token 用量消息流
+
+建议在 IDE 中直接运行 `VibeCodeCliMain.main()`；如果用 Gradle 运行，也可以把该入口配置为应用主类后启动。
+
+### 上下文管理
 - **上下文压缩**：`ContextCompactor` 在会话历史超出 token 上限时自动调用 LLM 生成摘要。
 - **内置安全防护**：始终拼接、无法被 `agentMd` 关闭，抵御提示词反取 / 注入 / 调试输出。
 

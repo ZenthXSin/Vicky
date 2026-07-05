@@ -3,15 +3,8 @@ package org.example.vicky.agent
 import com.aallam.openai.api.chat.ChatCompletionRequest
 import com.aallam.openai.api.chat.ChatMessage
 import com.aallam.openai.api.chat.ChatRole
-import com.aallam.openai.api.chat.FunctionTool
-import com.aallam.openai.api.core.Parameters
 import com.aallam.openai.api.chat.ToolCall
-import com.aallam.openai.api.chat.ToolType
 import com.aallam.openai.client.OpenAI
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withTimeout
-import kotlinx.serialization.json.Json
 import org.example.vicky.context.ContextManager
 import org.example.vicky.io.InboundMessage
 import org.example.vicky.io.MessageSink
@@ -184,7 +177,7 @@ abstract class Agent(
                     tools = oaiTools.takeIf { it.isNotEmpty() },
                     temperature = config.temperature,
                 )
-                val cr = completeChat(request, onDebug = if (config.debug) { s -> log(s) } else null)
+                val cr = ChatCompletionRunner(openAi, config).complete(request, onDebug = if (config.debug) { s -> log(s) } else null)
                 sess.contextTokens += cr.promptTokens
                 sess.usedTokens += cr.completionTokens
                 emit(OutboundMessage.TokenUsage(msg.conversationId, msg.userId, msg.groupId, cr.promptTokens, cr.completionTokens, sess.usedTokens))
@@ -194,7 +187,7 @@ abstract class Agent(
                 var calls = assistant.toolCalls.orEmpty()
                 // 兜底：模型把工具调用输出在 content 里（如 DeepSeek DSML 格式）
                 if (calls.isEmpty()) {
-                    val parsed = parseInlineToolCalls(assistant.content.orEmpty())
+                    val parsed = InlineToolCallParser.parse(assistant.content.orEmpty())
                     if (parsed.isNotEmpty()) {
                         calls = parsed
                         log("step ${step + 1}: parsed ${parsed.size} inline tool calls from content")
@@ -264,7 +257,7 @@ abstract class Agent(
             )
             history += wrapUpPrompt
             wrapUpMessage = wrapUpPrompt
-            val wrapUpCr = completeChat(
+            val wrapUpCr = ChatCompletionRunner(openAi, config).complete(
                 ChatCompletionRequest(
                     model = config.model,
                     messages = history.toList(),
@@ -328,188 +321,11 @@ abstract class Agent(
             .getOrElse { ToolResult(toAgent = "Error executing '$toolName': ${it.message}") }
     }
 
-    /**
-     * 统一的 chat completion 入口：根据 [AgentConfig.streaming] 选择流式或一次性请求。
-     * 两种模式的返回值语义一致：一条完整的 assistant [ChatMessage]，含拼装好的 content 与 toolCalls。
-     * 内置超时与重试。
-     */
-    private suspend fun completeChat(
-        request: ChatCompletionRequest,
-        onDebug: (suspend (String) -> Unit)? = null,
-    ): CompletionResult {
-        val timeoutMs = config.llmTimeoutMs
-        val maxRetries = config.llmMaxRetries
-        var lastException: Throwable? = null
-
-        repeat(maxRetries + 1) { attempt ->
-            try {
-                return withTimeout(timeoutMs) {
-                    completeChatOnce(request, onDebug)
-                }
-            } catch (e: Throwable) {
-                lastException = e
-                if (attempt < maxRetries) {
-                    val delayMs = 1000L * (attempt + 1)
-                    onDebug?.invoke("[retry] attempt ${attempt + 1} failed: ${e::class.simpleName}: ${e.message}, retrying in ${delayMs}ms")
-                    kotlinx.coroutines.delay(delayMs)
-                }
-            }
-        }
-        throw lastException!!
-    }
-
-    private suspend fun completeChatOnce(
-        request: ChatCompletionRequest,
-        onDebug: (suspend (String) -> Unit)? = null,
-    ): CompletionResult {
-        if (!config.streaming) {
-            val completion = openAi.chatCompletion(request)
-            return CompletionResult(
-                message = completion.choices.first().message,
-                promptTokens = completion.usage?.promptTokens ?: 0,
-                completionTokens = completion.usage?.completionTokens ?: 0,
-            )
-        }
-        val contentBuf = StringBuilder()
-        // toolCall 累积：index -> (id, name, argumentsBuf)
-        data class ToolCallAccum(var id: String? = null, var name: String? = null, val args: StringBuilder = StringBuilder())
-        val toolCalls = linkedMapOf<Int, ToolCallAccum>()
-        var role: ChatRole = ChatRole.Assistant
-        var chunkCount = 0
-        var contentChunkCount = 0
-        var toolChunkCount = 0
-        var finishReason: String? = null
-        var streamPromptTokens = 0
-        var streamCompletionTokens = 0
-        val streamRequest = request.copy(
-            streamOptions = com.aallam.openai.api.chat.StreamOptions(includeUsage = true),
-        )
-        try {
-            openAi.chatCompletions(streamRequest).collect { chunk ->
-                chunkCount++
-                chunk.usage?.let {
-                    streamPromptTokens = it.promptTokens ?: 0
-                    streamCompletionTokens = it.completionTokens ?: 0
-                }
-                val choice = chunk.choices.firstOrNull() ?: return@collect
-                choice.finishReason?.let { finishReason = it.value }
-                val delta = choice.delta ?: return@collect
-                delta.role?.let { role = it }
-                delta.content?.let { contentBuf.append(it); contentChunkCount++ }
-                delta.toolCalls?.forEach { tcc ->
-                    toolChunkCount++
-                    val accum = toolCalls.getOrPut(tcc.index) { ToolCallAccum() }
-                    tcc.id?.takeIf { it.id.isNotBlank() }?.let { accum.id = it.id }
-                    tcc.function?.nameOrNull?.takeIf { it.isNotBlank() }?.let { accum.name = it }
-                    tcc.function?.argumentsOrNull?.let { accum.args.append(it) }
-                }
-            }
-        } catch (e: Throwable) {
-            onDebug?.invoke("[stream] collect threw ${e::class.simpleName}: ${e.message} (after $chunkCount chunks, content=$contentChunkCount, toolDeltas=$toolChunkCount)")
-            throw e
-        }
-        onDebug?.invoke("[stream] done: chunks=$chunkCount content=$contentChunkCount toolDeltas=$toolChunkCount finish=$finishReason toolCallAccums=${toolCalls.size}")
-        if (chunkCount == 0) {
-            throw IllegalStateException("流式响应未收到任何 chunk（网关可能未真正推送 SSE 数据）")
-        }
-        if (contentChunkCount == 0 && toolCalls.isEmpty()) {
-            throw IllegalStateException("流式响应有 $chunkCount 个 chunk，但 content 与 tool_calls 全空（网关可能吞掉了 delta，finish=$finishReason）")
-        }
-        if (onDebug != null) {
-            for ((idx, acc) in toolCalls) {
-                onDebug("[stream] raw accum[$idx]: id=${acc.id} name=${acc.name} argsLen=${acc.args.length}")
-            }
-        }
-        val validAccums = toolCalls.values
-            .filter { !it.name.isNullOrBlank() }
-            .map { acc ->
-                val argsStr = acc.args.toString().ifBlank { "{}" }
-                val id = acc.id?.takeIf { it.isNotBlank() } ?: "call_${java.util.UUID.randomUUID().toString().replace("-", "").take(16)}"
-                Triple(acc, id, argsStr)
-            }
-        if (onDebug != null) {
-            for ((acc, id, argsStr) in validAccums) {
-                onDebug("[stream] tool_call assembled: name=${acc.name} id=$id args=${argsStr.take(300)}")
-            }
-        }
-        val builtToolCalls = validAccums.map { (acc, id, argsStr) ->
-            ToolCall.Function(
-                id = com.aallam.openai.api.chat.ToolId(id),
-                function = com.aallam.openai.api.chat.FunctionCall(
-                    nameOrNull = acc.name,
-                    argumentsOrNull = argsStr,
-                ),
-            )
-        }
-        return CompletionResult(
-            message = ChatMessage(
-                role = role,
-                content = contentBuf.toString().ifEmpty { null },
-                toolCalls = builtToolCalls.ifEmpty { null },
-            ),
-            promptTokens = streamPromptTokens,
-            completionTokens = streamCompletionTokens,
-        )
-    }
-
     private fun buildOpenAiTools(): List<OAITool> {
         cachedOaiTools?.let { return it }
-        val result = tools.snapshot().map { t ->
-            OAITool(
-                type = ToolType.Function,
-                function = FunctionTool(
-                    name = t.name,
-                    description = t.description,
-                    parameters = Parameters.fromJsonString(Json.encodeToString(kotlinx.serialization.json.JsonObject.serializer(), t.parameters)),
-                ),
-            )
-        }
+        val result = OpenAiToolSchemaBuilder.build(tools)
         cachedOaiTools = result
         return result
-    }
-
-    /**
-     * 兜底解析：模型把工具调用以文本形式输出在 content 里（如 DeepSeek DSML 格式）。
-     * 格式示例：
-     * <｜｜DSML｜｜tool_calls>
-     * <｜｜DSML｜｜invoke name="tool_name">
-     * <｜｜DSML｜｜parameter name="key">value</｜｜DSML｜｜parameter>
-     * </｜｜DSML｜｜invoke>
-     * </｜｜DSML｜｜tool_calls>
-     */
-    private fun parseInlineToolCalls(content: String): List<ToolCall> {
-        if (!content.contains("DSML")) return emptyList()
-        val results = mutableListOf<ToolCall>()
-        val invokePattern = Regex(
-            """<\|?\|?DSML\|?\|?invoke\s+name="([^"]+)">(.*?)</\|?\|?DSML\|?\|?invoke>""",
-            RegexOption.DOT_MATCHES_ALL,
-        )
-        val paramPattern = Regex(
-            """<\|?\|?DSML\|?\|?parameter\s+name="([^"]+)"[^>]*>(.*?)</\|?\|?DSML\|?\|?parameter>""",
-            RegexOption.DOT_MATCHES_ALL,
-        )
-        for ((idx, match) in invokePattern.findAll(content).withIndex()) {
-            val toolName = match.groupValues[1]
-            val body = match.groupValues[2]
-            val args = mutableMapOf<String, kotlinx.serialization.json.JsonElement>()
-            for (paramMatch in paramPattern.findAll(body)) {
-                val key = paramMatch.groupValues[1]
-                val rawValue = paramMatch.groupValues[2].trim()
-                val jsonValue = rawValue.toIntOrNull()?.let { kotlinx.serialization.json.JsonPrimitive(it) }
-                    ?: rawValue.toLongOrNull()?.let { kotlinx.serialization.json.JsonPrimitive(it) }
-                    ?: rawValue.toBooleanStrictOrNull()?.let { kotlinx.serialization.json.JsonPrimitive(it) }
-                    ?: kotlinx.serialization.json.JsonPrimitive(rawValue)
-                args[key] = jsonValue
-            }
-            results += ToolCall.Function(
-                id = com.aallam.openai.api.chat.ToolId("inline_${idx}_$toolName"),
-                function = com.aallam.openai.api.chat.FunctionCall(
-                    nameOrNull = toolName,
-                    argumentsOrNull = kotlinx.serialization.json.JsonObject(args).toString(),
-                ),
-            )
-        }
-        return results
     }
 
     fun contextReport(conversationId: String): String {

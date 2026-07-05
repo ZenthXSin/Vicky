@@ -9,15 +9,22 @@ import org.example.vicky.context.ContextManager
 import org.example.vicky.io.InboundMessage
 import org.example.vicky.io.MessageSink
 import org.example.vicky.llm.OpenAiClientFactory
+import org.example.vicky.tool.ToolAuthorizer
 import org.example.vicky.tool.ToolRegistry
 
 class VibeAgent(
     config: AgentConfig,
 ) : Agent(config, OpenAiClientFactory.create(config)) {
 
-    override val sink: MessageSink = MessageSink { /* silent */ }
+    public override var sink: MessageSink = MessageSink { /* silent */ }
 
     override val contextManager: ContextManager = VibeContextManager(config)
+
+    override val authorizer = ToolAuthorizer.ALLOW_ALL
+
+    val vibeSink: MessageSink get() = sink
+    val vibeContextManager: ContextManager get() = contextManager
+    val vibeAuthorizer: ToolAuthorizer get() = authorizer
 
     var lastAssistantReply: String? = null
         private set

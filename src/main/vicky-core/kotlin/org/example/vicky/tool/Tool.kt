@@ -15,6 +15,8 @@ abstract class Tool {
 
     abstract suspend fun execute(userId: String, args: JsonObject): ToolResult
 
+    open fun isConcurrencySafe(args: JsonObject): Boolean = false
+
     /**
      * 带上下文的执行入口。框架实际调用此方法，默认委托给 [execute] (userId, args)。
      * 需要访问会话/注册表的工具 (如内置的清除上下文) 可 override 此方法。
