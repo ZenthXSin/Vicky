@@ -15,4 +15,5 @@ class CommandContext(
     val conversationId: String,
     val groupId: String = "",
     val sink: MessageSink,
+    val isAdmin: Boolean = false,
 )

@@ -11,6 +11,7 @@ abstract class Command {
     abstract val name: String
     open val aliases: List<String> = emptyList()
     abstract val description: String
+    open val adminOnly: Boolean = false
 
     abstract suspend fun execute(ctx: CommandContext, args: String): CommandResult
 }
@@ -28,16 +29,19 @@ fun command(
     name: String,
     description: String,
     aliases: List<String> = emptyList(),
+    adminOnly: Boolean = false,
     execute: suspend (ctx: CommandContext, args: String) -> CommandResult,
 ): Command {
     val n = name
     val d = description
     val a = aliases
+    val ao = adminOnly
     val fn = execute
     return object : Command() {
         override val name = n
         override val aliases = a
         override val description = d
+        override val adminOnly = ao
         override suspend fun execute(ctx: CommandContext, args: String) = fn(ctx, args)
     }
 }

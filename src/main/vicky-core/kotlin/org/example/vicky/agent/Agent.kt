@@ -160,7 +160,9 @@ abstract class Agent(
             if (config.think) emit(OutboundMessage.Think(msg.conversationId, msg.userId, msg.groupId, content))
         }
 
-        val oaiTools = if (config.mode.toolsEnabled) buildOpenAiTools() else emptyList()
+        val toolsEnabled = config.mode.toolsEnabled
+        val oaiTools = if (toolsEnabled) buildOpenAiTools() else emptyList()
+        val oaiToolsMinimal = if (toolsEnabled && config.lazyToolSchema) buildOpenAiToolsMinimal() else oaiTools
         contextManager.ensureContextBudget(history)
 
         var assistantReply: String? = null
@@ -174,14 +176,34 @@ abstract class Agent(
                 val request = ChatCompletionRequest(
                     model = config.model,
                     messages = history.toList(),
-                    tools = oaiTools.takeIf { it.isNotEmpty() },
+                    tools = oaiToolsMinimal.takeIf { it.isNotEmpty() },
                     temperature = config.temperature,
                 )
                 val cr = ChatCompletionRunner(openAi, config).complete(request, onDebug = if (config.debug) { s -> log(s) } else null)
                 sess.contextTokens += cr.promptTokens
                 sess.usedTokens += cr.completionTokens
                 emit(OutboundMessage.TokenUsage(msg.conversationId, msg.userId, msg.groupId, cr.promptTokens, cr.completionTokens, sess.usedTokens))
-                val assistant = cr.message
+
+                // 两阶段：若 lazyToolSchema 且模型发出工具调用，用完整 schema 再请求一次以获取正确参数
+                val assistant = if (config.lazyToolSchema && toolsEnabled && cr.message.toolCalls.orEmpty().isNotEmpty()) {
+                    val calledNames = cr.message.toolCalls!!.mapNotNull { (it as? ToolCall.Function)?.function?.name }.toSet()
+                    log("step ${step + 1}: lazy schema phase-2 for tools: $calledNames")
+                    val fullSchemaTools = buildOpenAiToolsFor(calledNames)
+                    val req2 = ChatCompletionRequest(
+                        model = config.model,
+                        messages = history.toList(),
+                        tools = fullSchemaTools.takeIf { it.isNotEmpty() },
+                        temperature = config.temperature,
+                    )
+                    val cr2 = completeChat(req2, onDebug = if (config.debug) { s -> log(s) } else null)
+                    sess.contextTokens += cr2.promptTokens
+                    sess.usedTokens += cr2.completionTokens
+                    emit(OutboundMessage.TokenUsage(msg.conversationId, msg.userId, msg.groupId, cr2.promptTokens, cr2.completionTokens, sess.usedTokens))
+                    cr2.message
+                } else {
+                    cr.message
+                }
+
                 history += assistant
 
                 var calls = assistant.toolCalls.orEmpty()
@@ -257,6 +279,7 @@ abstract class Agent(
             )
             history += wrapUpPrompt
             wrapUpMessage = wrapUpPrompt
+            contextManager.ensureContextBudget(history)
             val wrapUpCr = ChatCompletionRunner(openAi, config).complete(
                 ChatCompletionRequest(
                     model = config.model,
@@ -270,10 +293,10 @@ abstract class Agent(
             emit(OutboundMessage.TokenUsage(msg.conversationId, msg.userId, msg.groupId, wrapUpCr.promptTokens, wrapUpCr.completionTokens, sess.usedTokens))
             val wrapUp = wrapUpCr.message
             history += wrapUp
-            assistantReply = wrapUp.content
-            wrapUp.content?.takeIf { it.isNotBlank() }?.let {
-                emit(OutboundMessage.AgentReply(msg.conversationId, msg.userId, msg.groupId, it))
-            }
+            val wrapUpContent = wrapUp.content?.takeIf { it.isNotBlank() }
+                ?: "[已达到最大步数限制，无法生成完整回复。]"
+            assistantReply = wrapUpContent
+            emit(OutboundMessage.AgentReply(msg.conversationId, msg.userId, msg.groupId, wrapUpContent))
         } catch (e: Throwable) {
             log("receive() failed: ${e::class.simpleName}: ${e.message}")
             if (config.debug) e.printStackTrace()
@@ -328,6 +351,36 @@ abstract class Agent(
         return result
     }
 
+    private fun buildOpenAiToolsMinimal(): List<OAITool> =
+        tools.snapshot().map { t ->
+            OAITool(
+                type = ToolType.Function,
+                function = FunctionTool(
+                    name = t.name,
+                    description = t.description,
+                    parameters = Parameters.fromJsonString("""{"type":"object","properties":{}}"""),
+                ),
+            )
+        }
+
+    private fun buildOpenAiToolsFor(toolNames: Set<String>): List<OAITool> =
+        tools.snapshot()
+            .filter { it.name in toolNames }
+            .map { t ->
+                OAITool(
+                    type = ToolType.Function,
+                    function = FunctionTool(
+                        name = t.name,
+                        description = t.description,
+                        parameters = Parameters.fromJsonString(Json.encodeToString(kotlinx.serialization.json.JsonObject.serializer(), t.parameters)),
+                    ),
+                )
+            }
+
+    fun compactContext(conversationId: String) {
+        val history = contextManager.history(conversationId)
+        contextManager.compactOldToolRounds(history)
+    }
     fun contextReport(conversationId: String): String {
         val history = contextManager.history(conversationId)
         val charsPerToken = 3
@@ -373,7 +426,10 @@ abstract class Agent(
         }
 
         val toolSchemaChars = tools.snapshot().sumOf { t ->
-            t.name.length + t.description.length + t.parameters.toString().length
+            if (config.lazyToolSchema)
+                t.name.length + t.description.length + 38 // 最小 schema: {"type":"object","properties":{}}
+            else
+                t.name.length + t.description.length + t.parameters.toString().length
         }
 
         val parts = listOf(
@@ -395,22 +451,30 @@ abstract class Agent(
                 if (chars == 0) continue
                 val tk = chars / charsPerToken
                 val pct = if (totalTk > 0) tk * 100 / totalTk else 0
-                appendLine("%-10s %5d tk  %3d%%".format(label, tk, pct))
+                appendLine("%-10s %5s tk  %3d%%".format(label, fmtTk(tk), pct))
                 if (label == "系统提示词" && systemBreakdown.isNotEmpty()) {
                     for ((subLabel, subChars) in systemBreakdown) {
                         if (subChars > 0)
-                            appendLine("  %-9s %5d tk".format("└$subLabel", subChars / charsPerToken))
+                            appendLine("  %-9s %5s tk".format("└$subLabel", fmtTk(subChars / charsPerToken)))
                     }
                 }
             }
             appendLine()
-            append("合计: ~$totalTk tk (字符估算，非API实际值)")
+            append("合计: ~${fmtTk(totalTk)} tk (字符估算，非API实际值)")
             if (sess != null) {
                 appendLine()
-                append("本轮: →${sess.contextTokens}tk 传入 / ←${sess.usedTokens}tk 输出")
+                append("会话累计: →${fmtTk(sess.contextTokens)} tk 传入 / ←${fmtTk(sess.usedTokens)} tk 输出")
             }
         }.trimEnd()
     }
+
+    private fun fmtTk(tk: Long): String = when {
+        tk >= 1_000_000 -> "%.1fM".format(tk / 1_000_000.0)
+        tk >= 1_000     -> "%.1fk".format(tk / 1_000.0)
+        else            -> "$tk"
+    }
+
+    private fun fmtTk(tk: Int): String = fmtTk(tk.toLong())
 
     private fun breakdownSystemPrompt(prompt: String): List<Pair<String, Int>> {
         val sectionRegex = Regex("(?=\\n\\n# )")

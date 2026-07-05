@@ -67,6 +67,9 @@ class CommandRegistry {
         val cmd = commands[cmdName]
             ?: return CommandResult(reply = "未知命令: /$cmdName")
 
+        if (cmd.adminOnly && !ctx.isAdmin)
+            return CommandResult(reply = "此命令仅管理员可用。")
+
         return cmd.execute(ctx, args)
     }
 }

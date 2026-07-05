@@ -211,11 +211,13 @@ class OneBot(
             val conversationId = group.id.toString()
             val userId = sender.id.toString()
             val groupId = group.id.toString()
+            val isAdmin = userId in adminList
 
-            // 命令分发
+            // 剥离 @Bot mention 后再分发命令（群消息 rawText 含 @userId 前缀）
+            val cmdText = rawText.replace(Regex("^@\\d+\\s*"), "")
             val cmdResult = commandRegistry.dispatch(
-                CommandContext(userId, conversationId, groupId, buildContactSink(userId, groupId)),
-                rawText,
+                CommandContext(userId, conversationId, groupId, buildContactSink(userId, groupId), isAdmin),
+                cmdText,
             )
             if (cmdResult != null) {
                 cmdResult.reply?.let { group.sendMessage(it) }
@@ -241,10 +243,10 @@ class OneBot(
             val rawText = message.content
             val userId = sender.id.toString()
             val conversationId = userId
+            val isAdmin = userId in adminList
 
-            // 命令分发
             val cmdResult = commandRegistry.dispatch(
-                CommandContext(userId, conversationId, sink = buildContactSink(userId, "")),
+                CommandContext(userId, conversationId, sink = buildContactSink(userId, ""), isAdmin = isAdmin),
                 rawText,
             )
             if (cmdResult != null) {
@@ -272,10 +274,10 @@ class OneBot(
             val rawText = message.content
             val userId = sender.id.toString()
             val conversationId = userId
+            val isAdmin = userId in adminList
 
-            // 命令分发
             val cmdResult = commandRegistry.dispatch(
-                CommandContext(userId, conversationId, sink = buildContactSink(userId, "")),
+                CommandContext(userId, conversationId, sink = buildContactSink(userId, ""), isAdmin = isAdmin),
                 rawText,
             )
             if (cmdResult != null) {

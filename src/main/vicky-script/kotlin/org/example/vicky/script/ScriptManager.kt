@@ -5,6 +5,7 @@ import kotlinx.coroutines.cancel
 import org.mozilla.javascript.Function
 import org.example.vicky.tool.Tool
 import org.example.vicky.tool.ToolRegistry
+import org.example.vicky.command.CommandRegistry
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -24,6 +25,7 @@ object ScriptManager {
     private val engine = ScriptEngine()
     private val loadedScripts = ConcurrentHashMap<String, ScriptToolBridge>()
     private val exportsMap = ConcurrentHashMap<String, ScriptExports>()
+    private val loadedCommands = ConcurrentHashMap<String, List<ScriptCommandBridge>>()
 
     /** 正在加载中的脚本（循环依赖检测）。 */
     private val loadingScripts = mutableSetOf<String>()
@@ -83,7 +85,8 @@ object ScriptManager {
     }
 
     /** 卸载脚本并从 registry 移除。onUnload 异常不会阻止卸载。 */
-    fun unloadScript(fileName: String, registry: ToolRegistry) {
+    fun unloadScript(fileName: String, registry: ToolRegistry, commandRegistry: CommandRegistry? = null) {
+        loadedCommands.remove(fileName)?.forEach { commandRegistry?.unregister(it.name) }
         loadedScripts.remove(fileName)?.let { bridge ->
             registry.unregister(bridge.name)
             // 调用 onUnload（安全容错）
@@ -97,21 +100,36 @@ object ScriptManager {
     }
 
     /** 重载脚本：卸载旧的，编译新的，注册到 registry。 */
-    fun reloadScript(file: File, registry: ToolRegistry, options: TsCompilerOptions = TsCompilerOptions()) {
+    fun reloadScript(file: File, registry: ToolRegistry, commandRegistry: CommandRegistry? = null, options: TsCompilerOptions = TsCompilerOptions()) {
         val fileName = file.name
-        unloadScript(fileName, registry)
+        unloadScript(fileName, registry, commandRegistry)
         val bridge = loadScript(file, options)
         registry.register(bridge)
+        registerScriptCommands(file.name, commandRegistry)
     }
 
-    /** 加载脚本并注册到 registry。只有定义了 execute 的脚本才会注册为工具。 */
-    fun loadAndRegister(file: File, registry: ToolRegistry, options: TsCompilerOptions = TsCompilerOptions()): ScriptToolBridge {
+    /** 加载脚本并注册到 registry。只有定义了 execute 的脚本才会注册为工具；定义了 commands 的脚本会注册命令。 */
+    fun loadAndRegister(file: File, registry: ToolRegistry, commandRegistry: CommandRegistry? = null, options: TsCompilerOptions = TsCompilerOptions()): ScriptToolBridge {
         val bridge = loadScript(file, options)
         val exports = exportsMap[file.name]
         if (exports?.executeFn != null) {
             registry.register(bridge)
         }
+        registerScriptCommands(file.name, commandRegistry)
         return bridge
+    }
+
+    private fun registerScriptCommands(fileName: String, commandRegistry: CommandRegistry?) {
+        if (commandRegistry == null) return
+        val exports = exportsMap[fileName] ?: return
+        if (exports.commandsDef.isEmpty()) return
+        val bridges = exports.commandsDef.mapNotNull { def ->
+            runCatching { ScriptCommandBridge(exports, def) }
+                .onFailure { e -> println("[Vicky][script] 命令注册失败 ($fileName): ${e.message}") }
+                .getOrNull()
+        }
+        bridges.forEach { commandRegistry.register(it) }
+        loadedCommands[fileName] = bridges
     }
 
     /** 获取所有已加载的脚本。 */
