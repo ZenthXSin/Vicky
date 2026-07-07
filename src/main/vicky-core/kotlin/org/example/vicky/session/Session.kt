@@ -16,6 +16,11 @@ class Session(
     @Volatile var historyLoaded = false
     @Volatile var contextTokens: Int = 0
     @Volatile var usedTokens: Int = 0
+    @Volatile var lastAccessedAt: Long = System.currentTimeMillis()
+
+    fun touch(now: Long = System.currentTimeMillis()) {
+        lastAccessedAt = now
+    }
 
     suspend fun receive(
         msg: InboundMessage,

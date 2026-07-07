@@ -69,7 +69,7 @@ class SqliteSessionStore(dataDir: File) : SessionStore {
         }
     }
 
-    fun close() { if (!db.isClosed) db.close() }
+    override fun close() { if (!db.isClosed) db.close() }
 }
 
 @Serializable

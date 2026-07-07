@@ -53,6 +53,7 @@ class VibeMessagePipeline(
                 stepCount = step + 1
                 request.contextManager.ensureContextBudget(history)
                 emitDebug("vibe step ${step + 1}/${request.config.maxSteps} -> requesting completion (${history.size} msgs)")
+                var stepStreamed = false
                 val completion = completionRunner.complete(
                     ChatCompletionRequest(
                         model = request.config.model,
@@ -61,6 +62,10 @@ class VibeMessagePipeline(
                         temperature = request.config.temperature,
                     ),
                     onDebug = if (request.config.debug) { s -> emitDebug(s) } else null,
+                    onDelta = { delta ->
+                        stepStreamed = true
+                        request.sink.emit(OutboundMessage.AgentReplyDelta(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId, delta))
+                    },
                 )
                 promptTokens += completion.promptTokens
                 completionTokens += completion.completionTokens
@@ -86,11 +91,19 @@ class VibeMessagePipeline(
                 if (calls.isEmpty()) {
                     assistantReply = assistant.content
                     if (request.config.mode.emitAgentText) {
-                        assistantReply?.takeIf { it.isNotBlank() }?.let {
-                            request.sink.emit(OutboundMessage.AgentReply(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId, it))
+                        if (stepStreamed) {
+                            request.sink.emit(OutboundMessage.AgentReplyDone(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId))
+                        } else {
+                            assistantReply?.takeIf { it.isNotBlank() }?.let {
+                                request.sink.emit(OutboundMessage.AgentReply(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId, it))
+                            }
                         }
                     }
                     return VibeTurnResult(assistantReply, toolUses, promptTokens, completionTokens, success = true, stepCount = stepCount)
+                }
+
+                if (stepStreamed) {
+                    request.sink.emit(OutboundMessage.AgentReplyDone(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId))
                 }
 
                 assistant.content?.takeIf { it.isNotBlank() }?.let { emitThink(it) }
@@ -120,6 +133,7 @@ class VibeMessagePipeline(
             )
             history += wrapUpPrompt
             wrapUpMessage = wrapUpPrompt
+            var wrapUpStreamed = false
             val wrapUp = completionRunner.complete(
                 ChatCompletionRequest(
                     model = request.config.model,
@@ -127,13 +141,21 @@ class VibeMessagePipeline(
                     temperature = request.config.temperature,
                 ),
                 onDebug = if (request.config.debug) { s -> emitDebug(s) } else null,
+                onDelta = { delta ->
+                    wrapUpStreamed = true
+                    request.sink.emit(OutboundMessage.AgentReplyDelta(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId, delta))
+                },
             )
             promptTokens += wrapUp.promptTokens
             completionTokens += wrapUp.completionTokens
             history += wrapUp.message
             assistantReply = wrapUp.message.content
-            assistantReply?.takeIf { it.isNotBlank() }?.let {
-                request.sink.emit(OutboundMessage.AgentReply(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId, it))
+            if (wrapUpStreamed) {
+                request.sink.emit(OutboundMessage.AgentReplyDone(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId))
+            } else {
+                assistantReply?.takeIf { it.isNotBlank() }?.let {
+                    request.sink.emit(OutboundMessage.AgentReply(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId, it))
+                }
             }
             VibeTurnResult(assistantReply, toolUses, promptTokens, completionTokens, success = false, error = "maxSteps exhausted", stepCount = stepCount)
         } catch (e: Throwable) {

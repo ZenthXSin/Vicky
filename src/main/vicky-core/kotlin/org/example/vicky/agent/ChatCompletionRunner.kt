@@ -18,13 +18,14 @@ class ChatCompletionRunner(
     suspend fun complete(
         request: ChatCompletionRequest,
         onDebug: (suspend (String) -> Unit)? = null,
+        onDelta: (suspend (String) -> Unit)? = null,
     ): CompletionResult {
         var lastException: Throwable? = null
 
         repeat(config.llmMaxRetries + 1) { attempt ->
             try {
                 return withTimeout(config.llmTimeoutMs) {
-                    completeOnce(request, onDebug)
+                    completeOnce(request, onDebug, onDelta)
                 }
             } catch (e: Throwable) {
                 lastException = e
@@ -41,6 +42,7 @@ class ChatCompletionRunner(
     private suspend fun completeOnce(
         request: ChatCompletionRequest,
         onDebug: (suspend (String) -> Unit)? = null,
+        onDelta: (suspend (String) -> Unit)? = null,
     ): CompletionResult {
         if (!config.streaming) {
             val completion = openAi.chatCompletion(request)
@@ -77,6 +79,7 @@ class ChatCompletionRunner(
                 delta.content?.let {
                     contentBuf.append(it)
                     contentChunkCount++
+                    onDelta?.invoke(it)
                 }
                 delta.toolCalls?.forEach { tcc ->
                     toolChunkCount++
