@@ -2386,7 +2386,6 @@ bin/
 /src/main/vicky-script/config/skills/runtime-api/YieldKt/SKILL.md
 /src/main/vicky-script/config/skills/runtime-api/group.md
 /CLAUDE.md
-/src/main/kotlin/org/example/vicky/command/ContextInfoCommand.kt
 /src/main/vicky-script/config/skills/runtime-api/ApiPath/SKILL.md
 /src/main/vicky-script/config/skills/runtime-api/ApproximateLocation/SKILL.md
 /src/main/vicky-script/config/skills/runtime-api/AssistantMessageBuilder/SKILL.md
