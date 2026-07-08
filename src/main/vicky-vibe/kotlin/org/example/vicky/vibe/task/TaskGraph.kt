@@ -10,6 +10,7 @@ interface TaskGraph {
     fun get(id: String): VibeTask?
     fun all(): List<VibeTask>
     fun ready(): List<VibeTask>
+    fun clear()
 }
 
 class InMemoryTaskGraph : TaskGraph {
@@ -36,5 +37,10 @@ class InMemoryTaskGraph : TaskGraph {
     override fun ready(): List<VibeTask> {
         val completedIds = tasks.values.filter { it.status == VibeTaskStatus.COMPLETED }.map { it.id }.toSet()
         return tasks.values.filter { it.status == VibeTaskStatus.PENDING && completedIds.containsAll(it.blockedBy) }
+    }
+
+    override fun clear() {
+        tasks.clear()
+        counter.set(0)
     }
 }

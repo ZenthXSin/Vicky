@@ -116,4 +116,10 @@ private fun printStatus(snapshot: org.example.vicky.vibe.status.StatusSnapshot) 
     snapshot.stages.forEachIndexed { i, s ->
         println("  ${i + 1}. ${s.role.label} ${s.status} ${s.elapsed}ms${s.summary?.let { " - $it" } ?: ""}")
     }
+    if (snapshot.tasks.isNotEmpty()) {
+        println("  tasks:")
+        snapshot.tasks.forEach { task ->
+            println("    - ${task.status} ${task.id}: ${task.subject}")
+        }
+    }
 }

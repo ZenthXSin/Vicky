@@ -11,6 +11,7 @@ import org.example.vicky.io.MessageSink
 import org.example.vicky.llm.OpenAiClientFactory
 import org.example.vicky.tool.ToolAuthorizer
 import org.example.vicky.tool.ToolRegistry
+import java.util.concurrent.ConcurrentHashMap
 
 class VibeAgent(
     config: AgentConfig,
@@ -43,7 +44,7 @@ class VibeAgent(
 private class VibeContextManager(
     private val config: AgentConfig,
 ) : ContextManager {
-    private val history = mutableListOf<ChatMessage>()
+    private val histories = ConcurrentHashMap<String, MutableList<ChatMessage>>()
 
     companion object {
         private const val CHARS_PER_TOKEN = 4
@@ -53,7 +54,8 @@ private class VibeContextManager(
         private const val DEFAULT_CONTEXT_WINDOW = 128_000
     }
 
-    override fun history(conversationId: String): MutableList<ChatMessage> = history
+    override fun history(conversationId: String): MutableList<ChatMessage> =
+        histories.computeIfAbsent(conversationId) { mutableListOf() }
 
     override fun buildSystemPrompt(mode: AgentMode, tools: ToolRegistry): String = config.agentMd
 
@@ -71,7 +73,11 @@ private class VibeContextManager(
     }
 
     override fun clear(conversationId: String) {
-        history.clear()
+        if (conversationId == "*") {
+            histories.clear()
+        } else {
+            histories.remove(conversationId)
+        }
     }
 
     override fun trimIfNeeded(conversationId: String) {
@@ -81,9 +87,11 @@ private class VibeContextManager(
     /** 阶段结束后调用：压缩上下文以便传递给下一阶段 */
     fun compressAfterStage() {
         val limit = if (config.maxContextLength > 0) config.maxContextLength else DEFAULT_CONTEXT_WINDOW
-        val estimatedTokens = history.sumOf { estimateTokens(it) }
-        if (estimatedTokens > limit * SAFETY_RATIO) {
-            compressToBudget(history, limit)
+        histories.values.forEach { history ->
+            val estimatedTokens = history.sumOf { estimateTokens(it) }
+            if (estimatedTokens > limit * SAFETY_RATIO) {
+                compressToBudget(history, limit)
+            }
         }
     }
 
