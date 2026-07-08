@@ -13,6 +13,7 @@ import org.example.vicky.vibe.tool.VibeToolUse
 import org.example.vicky.vibe.tool.VibeToolUseQueue
 import org.example.vicky.vibe.turn.VibeTurnRequest
 import org.example.vicky.vibe.turn.VibeTurnResult
+import kotlin.coroutines.cancellation.CancellationException
 
 class VibeMessagePipeline(
     private val request: VibeTurnRequest,
@@ -35,6 +36,7 @@ class VibeMessagePipeline(
         var assistantReply: String? = null
         var stepCount = 0
         var wrapUpMessage: ChatMessage? = null
+        var replyStreamOpen = false
 
         suspend fun emitDebug(message: String) {
             if (request.config.debug) {
@@ -64,6 +66,7 @@ class VibeMessagePipeline(
                     onDebug = if (request.config.debug) { s -> emitDebug(s) } else null,
                     onDelta = { delta ->
                         stepStreamed = true
+                        replyStreamOpen = true
                         request.sink.emit(OutboundMessage.AgentReplyDelta(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId, delta))
                     },
                 )
@@ -93,6 +96,7 @@ class VibeMessagePipeline(
                     if (request.config.mode.emitAgentText) {
                         if (stepStreamed) {
                             request.sink.emit(OutboundMessage.AgentReplyDone(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId))
+                            replyStreamOpen = false
                         } else {
                             assistantReply?.takeIf { it.isNotBlank() }?.let {
                                 request.sink.emit(OutboundMessage.AgentReply(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId, it))
@@ -104,9 +108,10 @@ class VibeMessagePipeline(
 
                 if (stepStreamed) {
                     request.sink.emit(OutboundMessage.AgentReplyDone(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId))
+                    replyStreamOpen = false
+                } else {
+                    assistant.content?.takeIf { it.isNotBlank() }?.let { emitThink(it) }
                 }
-
-                assistant.content?.takeIf { it.isNotBlank() }?.let { emitThink(it) }
                 for (call in calls) emitThink("Use Tool: ${call.function.name}")
 
                 val queue = VibeToolUseQueue(
@@ -143,6 +148,7 @@ class VibeMessagePipeline(
                 onDebug = if (request.config.debug) { s -> emitDebug(s) } else null,
                 onDelta = { delta ->
                     wrapUpStreamed = true
+                    replyStreamOpen = true
                     request.sink.emit(OutboundMessage.AgentReplyDelta(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId, delta))
                 },
             )
@@ -152,13 +158,24 @@ class VibeMessagePipeline(
             assistantReply = wrapUp.message.content
             if (wrapUpStreamed) {
                 request.sink.emit(OutboundMessage.AgentReplyDone(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId))
+                replyStreamOpen = false
             } else {
                 assistantReply?.takeIf { it.isNotBlank() }?.let {
                     request.sink.emit(OutboundMessage.AgentReply(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId, it))
                 }
             }
             VibeTurnResult(assistantReply, toolUses, promptTokens, completionTokens, success = false, error = "maxSteps exhausted", stepCount = stepCount)
+        } catch (e: CancellationException) {
+            if (replyStreamOpen) {
+                request.sink.emit(OutboundMessage.AgentReplyDone(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId))
+                replyStreamOpen = false
+            }
+            throw e
         } catch (e: Throwable) {
+            if (replyStreamOpen) {
+                request.sink.emit(OutboundMessage.AgentReplyDone(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId))
+                replyStreamOpen = false
+            }
             emitDebug("vibe failed: ${e::class.simpleName}: ${e.message}")
             VibeTurnResult(assistantReply, toolUses, promptTokens, completionTokens, success = false, error = "${e::class.simpleName}: ${e.message}", stepCount = stepCount)
         } finally {

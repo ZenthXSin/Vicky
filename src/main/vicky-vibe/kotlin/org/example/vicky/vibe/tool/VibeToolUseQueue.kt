@@ -3,7 +3,10 @@ package org.example.vicky.vibe.tool
 import com.aallam.openai.api.chat.ChatMessage
 import com.aallam.openai.api.chat.ChatRole
 import com.aallam.openai.api.chat.ToolCall
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
+import kotlin.coroutines.cancellation.CancellationException
 import org.example.vicky.io.MessageSink
 import org.example.vicky.io.OutboundMessage
 import org.example.vicky.tool.ToolAuthorizer
@@ -28,10 +31,8 @@ class VibeToolUseQueue(
         for (call in calls) {
             val toolName = call.function.name
             val task = taskGraph?.create(subject = toolName)
-            task?.let {
-                taskGraph.update(it.id, VibeTaskStatus.IN_PROGRESS)
-                taskGraph.get(it.id)?.let { updated -> emitTaskUpdate(updated) }
-            }
+            updateTask(task?.id, VibeTaskStatus.IN_PROGRESS)
+
             val rawArgs = call.function.argumentsOrNull.orEmpty()
             val parsedArgs = runCatching { call.function.argumentsAsJson() }
                 .getOrElse { JsonObject(emptyMap()) }
@@ -54,13 +55,9 @@ class VibeToolUseQueue(
                 success = success,
                 result = toolContent,
             )
-            val finalStatus = if (success) VibeTaskStatus.COMPLETED else VibeTaskStatus.FAILED
-            task?.let {
-                taskGraph.update(it.id, finalStatus, toolContent)
-                taskGraph.get(it.id)?.let { updated -> emitTaskUpdate(updated) }
-            }
+            updateTask(task?.id, if (success) VibeTaskStatus.COMPLETED else VibeTaskStatus.FAILED, toolContent)
             result.userReply?.takeIf { it.isNotBlank() }?.let {
-                sink.emit(OutboundMessage.ToolReply(context.conversationId, context.userId, context.groupId, it, toolName))
+                runCatching { sink.emit(OutboundMessage.ToolReply(context.conversationId, context.userId, context.groupId, it, toolName)) }
             }
             if (result.endTurn) endTurn = true
         }
@@ -74,8 +71,24 @@ class VibeToolUseQueue(
         if (!authorizer.allow(context.userId, toolName)) {
             return ToolResult(toAgent = "Error: permission denied for user '${context.userId}' on tool '$toolName'.")
         }
-        return runCatching { tool.execute(context, args) }
-            .getOrElse { ToolResult(toAgent = "Error executing '$toolName': ${it.message}") }
+        return try {
+            withTimeout(TOOL_TIMEOUT_MS) { tool.execute(context, args) }
+        } catch (e: TimeoutCancellationException) {
+            ToolResult(toAgent = "Error executing '$toolName': timed out after ${TOOL_TIMEOUT_MS / 1000}s")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            ToolResult(toAgent = "Error executing '$toolName': ${e.message}")
+        }
+    }
+
+    private suspend fun updateTask(id: String?, status: VibeTaskStatus, result: String? = null) {
+        val graph = taskGraph ?: return
+        if (id == null) return
+        runCatching {
+            graph.update(id, status, result)
+            graph.get(id)?.let { emitTaskUpdate(it) }
+        }
     }
 
     private suspend fun emitTaskUpdate(task: org.example.vicky.vibe.task.VibeTask) {
@@ -84,5 +97,6 @@ class VibeToolUseQueue(
 
     private companion object {
         const val MAX_TOOL_RESULT_CHARS = 30_000
+        const val TOOL_TIMEOUT_MS = 90_000L
     }
 }

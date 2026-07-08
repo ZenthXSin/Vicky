@@ -5,7 +5,6 @@ import org.example.vicky.config.ConfigManager
 import org.example.vicky.memory.MemoryRuntime
 import org.example.vicky.tool.builtin.BuiltinTools
 import org.example.vicky.vibe.orchestrator.VibeOrchestrator
-import org.example.vicky.vibe.pipeline.OrchestratorResult
 import org.example.vicky.vibe.status.DefaultStatusPanel
 
 fun vibeCodeCliMain(args: Array<String>) = runBlocking {
@@ -52,8 +51,7 @@ fun vibeCodeCliMain(args: Array<String>) = runBlocking {
     }
 
     suspend fun runTurn(orchestrator: VibeOrchestrator, request: String) {
-        val result = orchestrator.execute(request)
-        printResult(result)
+        orchestrator.execute(request)
     }
 
     try {
@@ -108,17 +106,6 @@ private fun printHelp() {
     println("/clear  清空会话上下文")
     println("/status 查看当前状态")
     println("/exit   退出")
-}
-
-private fun printResult(result: OrchestratorResult) {
-    val stage = result.stages.lastOrNull()
-    val summary = stage?.summary?.takeIf { it.isNotBlank() }
-    val output = stage?.output?.trim().orEmpty()
-    println()
-    if (summary != null) println("● $summary")
-    if (output.isNotBlank()) println(output)
-    println()
-    println("· success=${result.success} tasks=${result.tasks.size} elapsed=${result.elapsed}ms")
 }
 
 private fun printStatus(snapshot: org.example.vicky.vibe.status.StatusSnapshot) {

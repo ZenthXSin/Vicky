@@ -101,7 +101,7 @@ class VibeCliRenderer(
     }
 
     override fun onStageComplete(stage: PipelineStage, output: StageOutput, index: Int, total: Int) {
-        if (output.summary.isNotBlank()) out.println("  ⎿  ${output.summary}")
+        if (output.pass == false && output.summary.isNotBlank()) out.println("  ⎿  ${output.summary}")
     }
 
     override fun onTaskUpdate(task: VibeTask) {
