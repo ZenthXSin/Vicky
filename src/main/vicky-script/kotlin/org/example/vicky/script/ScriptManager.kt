@@ -44,6 +44,16 @@ object ScriptManager {
         return loadScriptInternal(fileName) { engine.compileTs(tsSource, fileName, options) }
     }
 
+    /** 编译并执行宿主提供的 TS 内容。脚本名同时作为加载标识和默认工具名。 */
+    fun loadScript(
+        scriptName: String,
+        scriptContent: String,
+        options: TsCompilerOptions = TsCompilerOptions(),
+    ): ScriptToolBridge {
+        val normalizedName = normalizeScriptName(scriptName)
+        return loadScriptFromSource(scriptContent, normalizedName, options)
+    }
+
     /** 编译并执行 TS 源码字符串，返回 ScriptToolBridge。 */
     fun loadScriptFromSource(tsSource: String, fileName: String, options: TsCompilerOptions = TsCompilerOptions()): ScriptToolBridge {
         return loadScriptInternal(fileName) { engine.compileTs(tsSource, fileName, options) }
@@ -71,11 +81,15 @@ object ScriptManager {
             }
 
             exports.loaded = true
-            exportsMap[fileName] = exports
-
             val bridge = ScriptToolBridge(engine, exports)
-            loadedScripts[fileName]?.release()
-            loadedScripts[fileName] = bridge
+
+            val previousExports = exportsMap.put(fileName, exports)
+            val previousBridge = loadedScripts.put(fileName, bridge)
+            previousExports?.let { old ->
+                callOnUnloadSafely(old, fileName)
+                old.coroutineScope.cancel()
+            }
+            previousBridge?.release()
             return bridge
         } finally {
             synchronized(loadingScripts) {
@@ -108,6 +122,17 @@ object ScriptManager {
         registerScriptCommands(file.name, commandRegistry)
     }
 
+    /** 使用宿主提供的脚本内容重载并注册脚本。 */
+    fun reloadScript(
+        scriptName: String,
+        scriptContent: String,
+        registry: ToolRegistry,
+        commandRegistry: CommandRegistry? = null,
+        options: TsCompilerOptions = TsCompilerOptions(),
+    ) {
+        loadAndRegister(scriptName, scriptContent, registry, commandRegistry, options)
+    }
+
     /** 加载脚本并注册到 registry。只有定义了 execute 的脚本才会注册为工具；定义了 commands 的脚本会注册命令。 */
     fun loadAndRegister(file: File, registry: ToolRegistry, commandRegistry: CommandRegistry? = null, options: TsCompilerOptions = TsCompilerOptions()): ScriptToolBridge {
         val bridge = loadScript(file, options)
@@ -117,6 +142,37 @@ object ScriptManager {
         }
         registerScriptCommands(file.name, commandRegistry)
         return bridge
+    }
+
+    /** 加载宿主提供的脚本内容，并注册其工具和命令导出。 */
+    fun loadAndRegister(
+        scriptName: String,
+        scriptContent: String,
+        registry: ToolRegistry,
+        commandRegistry: CommandRegistry? = null,
+        options: TsCompilerOptions = TsCompilerOptions(),
+    ): ScriptToolBridge {
+        val normalizedName = normalizeScriptName(scriptName)
+        val previousToolName = loadedScripts[normalizedName]?.name
+        val previousCommands = loadedCommands[normalizedName].orEmpty()
+        val bridge = loadScript(normalizedName, scriptContent, options)
+
+        previousToolName?.let(registry::unregister)
+        previousCommands.forEach { commandRegistry?.unregister(it.name) }
+        loadedCommands.remove(normalizedName)
+
+        val exports = exportsMap[normalizedName]
+        if (exports?.executeFn != null) {
+            registry.register(bridge)
+        }
+        registerScriptCommands(normalizedName, commandRegistry)
+        return bridge
+    }
+
+    private fun normalizeScriptName(scriptName: String): String {
+        val normalized = scriptName.trim()
+        require(normalized.isNotEmpty()) { "scriptName must not be blank" }
+        return normalized
     }
 
     private fun registerScriptCommands(fileName: String, commandRegistry: CommandRegistry?) {
@@ -146,9 +202,16 @@ object ScriptManager {
 
     /** 释放所有脚本资源。 */
     fun shutdown() {
-        for ((_, bridge) in loadedScripts) bridge.release()
+        for ((fileName, bridge) in loadedScripts) {
+            exportsMap[fileName]?.let { exports ->
+                callOnUnloadSafely(exports, fileName)
+                exports.coroutineScope.cancel()
+            }
+            bridge.release()
+        }
         loadedScripts.clear()
         exportsMap.clear()
+        loadedCommands.clear()
         timeoutExecutor.shutdownNow()
     }
 

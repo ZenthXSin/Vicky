@@ -554,6 +554,11 @@ class ScriptEngine {
         val fn = object : BaseFunction(scope, funcProto) {
             override fun call(cx: Context, s: Scriptable, thisObj: Scriptable, args: Array<out Any?>): Any? {
                 if (args.size < 2) throw ScriptException("extend(BaseClass, impl, [...ctorArgs]) requires at least 2 args")
+                if (ScriptRuntimePlatform.isAndroid) {
+                    // TODO(android): install an ART GeneratedClassLoader (for example via rhino-android)
+                    // and route JavaAdapter output through it instead of ClassLoader.defineClass.
+                    throw ScriptException("extend() is not available on Android yet; use explicit registered classes instead")
+                }
                 val baseCls = ClassAutoRegistry.extractClass(args[0])
                     ?: throw ScriptException("extend: first arg must be a Java class reference (got ${args[0]?.javaClass?.simpleName})")
                 val impl = args[1] as? Scriptable
@@ -810,7 +815,9 @@ class ScriptEngine {
     }
 
     /** Dump 编译后 JS 到 config/scripts/.debug/，方便对照行号定位运行时错误。 */
-    private fun dumpDebugJs(fileName: String, jsSource: String): String? = try {
+    private fun dumpDebugJs(fileName: String, jsSource: String): String? = if (ScriptRuntimePlatform.isAndroid) {
+        null
+    } else try {
         val dir = java.io.File("config/scripts/.debug").apply { mkdirs() }
         val out = java.io.File(dir, fileName.removeSuffix(".ts") + ".js")
         out.writeText(jsSource, Charsets.UTF_8)

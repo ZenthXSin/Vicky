@@ -73,7 +73,7 @@ class SqliteSessionStore(dataDir: File) : SessionStore {
 }
 
 @Serializable
-private data class MsgDto(
+internal data class MsgDto(
     val role: String,
     val content: String? = null,
     val toolCallId: String? = null,
@@ -82,9 +82,9 @@ private data class MsgDto(
 )
 
 @Serializable
-private data class ToolCallDto(val id: String, val name: String?, val args: String?)
+internal data class ToolCallDto(val id: String, val name: String?, val args: String?)
 
-private fun ChatMessage.toDto() = MsgDto(
+internal fun ChatMessage.toDto() = MsgDto(
     role = role.role,
     content = content,
     toolCallId = toolCallId?.id,
@@ -94,7 +94,7 @@ private fun ChatMessage.toDto() = MsgDto(
     },
 )
 
-private fun MsgDto.toMsg() = ChatMessage(
+internal fun MsgDto.toMsg() = ChatMessage(
     role = ChatRole(role),
     content = content,
     toolCallId = toolCallId?.let { ToolId(it) },

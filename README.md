@@ -371,6 +371,42 @@ val agent = MyAgent(
 agent.receive(InboundMessage("user1", "ping 192.168.0.108"))
 ```
 
+## Android 作为库使用
+
+Android 应用可以直接依赖现有的 `vicky-core` 和 `vicky-script` 坐标，不需要依赖根应用或
+`vicky-vibe`：
+
+```kotlin
+dependencies {
+    implementation("io.github.zenthxsin:vicky-core:<version>")
+    implementation("io.github.zenthxsin:vicky-script:<version>")
+    ksp("io.github.zenthxsin:vicky-ksp:<version>")
+}
+```
+
+库产出 Java 17 字节码。脚本模块建议 Android API 26 及以上，并由宿主开启网络权限、管理
+协程和后台生命周期。脚本由宿主以名称和内容加载，不扫描或监听 Android 文件目录：
+
+```kotlin
+val bridge = ScriptManager.loadScript(
+    scriptName = "hello",
+    scriptContent = scriptText,
+)
+
+// 需要自动注册脚本导出的 Tool 时：
+ScriptManager.loadAndRegister("hello", scriptText, agent.tools)
+```
+
+Android/Dex 无法使用 JVM classpath 扫描。需要暴露给脚本的宿主类应显式注册：
+
+```kotlin
+ClassAutoRegistry.registerAll(MyApi::class.java, MyModel::class.java)
+```
+
+会话持久化可使用跨 JVM/Android 的 `JsonSessionStore(filesDir)`；JDBC
+`SqliteSessionStore` 保留给桌面 JVM。HTTP MCP 可用，stdio MCP 在 Android 上不支持。
+Rhino `extend()` 的 ART 动态类生成仍在适配中，Android 脚本暂时应使用显式注册的具体类。
+
 ## 配置参数
 
 根应用使用 `config/config.json` 配置文件，参见 [ROOT-MODULE.md](ROOT-MODULE.md)。

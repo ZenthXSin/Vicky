@@ -95,44 +95,9 @@ object ClassAutoRegistry {
                 classMap.putIfAbsent(cls.simpleName, cls)
                 collectMeta(cls)
             }
-            scanPackage("org.example.vicky")
-            // Java stdlib（java.lang 跳过，避免 Object/String/Map 等覆盖 JS 内置对象）
-            scanPackage("java.io")
-            scanPackage("java.nio")
-            scanPackage("java.nio.file")
-            scanPackage("java.nio.channels")
-            scanPackage("java.nio.charset")
-            scanPackage("java.util")
-            scanPackage("java.util.concurrent")
-            scanPackage("java.util.concurrent.atomic")
-            scanPackage("java.util.concurrent.locks")
-            scanPackage("java.util.function")
-            scanPackage("java.util.stream")
-            scanPackage("java.util.regex")
-            scanPackage("java.math")
-            scanPackage("java.net")
-            scanPackage("java.text")
-            scanPackage("java.time")
-            scanPackage("java.security")
-            // Kotlin stdlib
-            scanPackage("kotlin")
-            scanPackage("kotlin.annotation")
-            scanPackage("kotlin.collections")
-            scanPackage("kotlin.comparisons")
-            scanPackage("kotlin.io")
-            scanPackage("kotlin.ranges")
-            scanPackage("kotlin.sequences")
-            scanPackage("kotlin.text")
-            scanPackage("kotlin.time")
-            // Kotlinx
-            scanPackage("kotlinx.serialization.json")
-            scanPackage("kotlinx.coroutines")
-            scanPackage("kotlinx.coroutines.sync")
-            // OpenAI client
-            scanPackage("com.aallam.openai.client")
-            scanPackage("com.aallam.openai.api.model")
-            scanPackage("com.aallam.openai.api.chat")
-            scanPackage("com.aallam.openai.api.core")
+            if (!ScriptRuntimePlatform.isAndroid) {
+                scanJvmClasspath()
+            }
             initialized = true
             println("[Vicky][script] ClassAutoRegistry 已初始化: ${classMap.size} 个类可用")
         }
@@ -180,6 +145,11 @@ object ClassAutoRegistry {
     fun register(name: String, cls: Class<*>) {
         classMap[name] = cls
         collectMeta(cls)
+    }
+
+    /** Android/Dex hosts can explicitly expose application classes to scripts. */
+    fun registerAll(vararg classes: Class<*>) {
+        classes.forEach(::register)
     }
 
     fun registeredNames(): Set<String> = classMap.keys.toSet()
@@ -561,6 +531,22 @@ object ClassAutoRegistry {
 
     // ─── 扫描 ────────────────────────────────────────────────
 
+    private fun scanJvmClasspath() {
+        scanPackage("org.example.vicky")
+        // java.lang is intentionally omitted to avoid replacing JavaScript built-ins.
+        listOf(
+            "java.io", "java.nio", "java.nio.file", "java.nio.channels", "java.nio.charset",
+            "java.util", "java.util.concurrent", "java.util.concurrent.atomic",
+            "java.util.concurrent.locks", "java.util.function", "java.util.stream",
+            "java.util.regex", "java.math", "java.net", "java.text", "java.time",
+            "java.security", "kotlin", "kotlin.annotation", "kotlin.collections",
+            "kotlin.comparisons", "kotlin.io", "kotlin.ranges", "kotlin.sequences",
+            "kotlin.text", "kotlin.time", "kotlinx.serialization.json", "kotlinx.coroutines",
+            "kotlinx.coroutines.sync", "com.aallam.openai.client", "com.aallam.openai.api.model",
+            "com.aallam.openai.api.chat", "com.aallam.openai.api.core",
+        ).forEach(::scanPackage)
+    }
+
     private fun scanPackage(packageName: String) {
         val classLoader = ClassAutoRegistry::class.java.classLoader ?: return
         val path = packageName.replace('.', '/')
@@ -632,6 +618,8 @@ object ClassAutoRegistry {
     private fun shouldRegister(cls: Class<*>): Boolean =
         cls.simpleName.isNotEmpty() &&
             !cls.simpleName.contains('$') &&
+            !cls.name.startsWith("org.example.vicky.platform.") &&
+            cls != ScriptRuntimePlatform::class.java &&
             Modifier.isPublic(cls.modifiers) &&
             !cls.isSynthetic &&
             !cls.isAnonymousClass &&
@@ -683,26 +671,27 @@ object ClassAutoRegistry {
             // 注册分组
             SkillManager.registerGroup("runtime-api", "Vicky runtime classes and objects auto-injected into script scope.")
 
-            // 确定技能写入目录
-            val skillsDir = resolveSkillsDir() ?: run {
-                println("[Vicky][script] 无法确定 skills 目录，跳过技能文件写入")
-                return
+            val groupDir = if (ScriptRuntimePlatform.isAndroid) {
+                null
+            } else {
+                resolveSkillsDir()?.let { File(it, "runtime-api") }
             }
-            val groupDir = File(skillsDir, "runtime-api")
 
             // 写入 group.md
-            val groupMdFile = File(groupDir, "group.md")
-            if (!groupMdFile.exists()) {
-                groupDir.mkdirs()
-                groupMdFile.writeText(buildString {
-                    appendLine("---")
-                    appendLine("name: runtime-api")
-                    appendLine("description: Vicky runtime classes and objects auto-injected into script scope.")
-                    appendLine("---")
-                    appendLine()
-                    appendLine("此分组包含 Vicky 运行时所有自动注入的类和对象的 API 文档。")
-                    appendLine("每个类/object 对应一个技能，包含字段、构造方法、公开方法的完整签名。")
-                }, Charsets.UTF_8)
+            groupDir?.let { dir ->
+                val groupMdFile = File(dir, "group.md")
+                if (!groupMdFile.exists()) {
+                    dir.mkdirs()
+                    groupMdFile.writeText(buildString {
+                        appendLine("---")
+                        appendLine("name: runtime-api")
+                        appendLine("description: Vicky runtime classes and objects auto-injected into script scope.")
+                        appendLine("---")
+                        appendLine()
+                        appendLine("此分组包含 Vicky 运行时所有自动注入的类和对象的 API 文档。")
+                        appendLine("每个类/object 对应一个技能，包含字段、构造方法、公开方法的完整签名。")
+                    }, Charsets.UTF_8)
+                }
             }
 
             // 为每个有元数据的类生成技能
@@ -717,19 +706,21 @@ object ClassAutoRegistry {
                 SkillManager.register(Skill(name, description, body, group = "runtime-api"))
 
                 // 写入文件
-                val skillDir = File(groupDir, name)
-                val skillFile = File(skillDir, "SKILL.md")
-                if (!skillFile.exists()) {
-                    skillDir.mkdirs()
-                    skillFile.writeText(buildString {
-                        appendLine("---")
-                        appendLine("name: $name")
-                        appendLine("description: $description")
-                        appendLine("group: runtime-api")
-                        appendLine("---")
-                        appendLine()
-                        append(body)
-                    }, Charsets.UTF_8)
+                groupDir?.let { dir ->
+                    val skillDir = File(dir, name)
+                    val skillFile = File(skillDir, "SKILL.md")
+                    if (!skillFile.exists()) {
+                        skillDir.mkdirs()
+                        skillFile.writeText(buildString {
+                            appendLine("---")
+                            appendLine("name: $name")
+                            appendLine("description: $description")
+                            appendLine("group: runtime-api")
+                            appendLine("---")
+                            appendLine()
+                            append(body)
+                        }, Charsets.UTF_8)
+                    }
                 }
             }
 

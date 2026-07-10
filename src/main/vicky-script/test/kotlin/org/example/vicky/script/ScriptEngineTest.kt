@@ -464,6 +464,47 @@ class ScriptEngineTest {
         }
     }
 
+    @Test
+    fun `ScriptManager loads script from name and content`() = runBlocking {
+        val scriptName = "source_api_test"
+        val source = """
+            var name = "source_api_tool";
+            var parameters = { type: "object", properties: {} };
+            async function execute(ctx, args) {
+                return { toAgent: "loaded-from-content" };
+            }
+        """.trimIndent()
+        val registry = ToolRegistry()
+
+        try {
+            val bridge = ScriptManager.loadScript(scriptName, source)
+            assertEquals("source_api_tool", bridge.name)
+            assertNotNull(ScriptManager.get(scriptName))
+        } finally {
+            ScriptManager.unloadScript(scriptName, registry)
+        }
+    }
+
+    @Test
+    fun `ScriptManager registers script from name and content`() {
+        val scriptName = "source_register_test"
+        val source = """
+            var name = "source_register_tool";
+            var parameters = { type: "object", properties: {} };
+            async function execute(ctx, args) {
+                return { toAgent: "registered" };
+            }
+        """.trimIndent()
+        val registry = ToolRegistry()
+
+        try {
+            ScriptManager.loadAndRegister(scriptName, source, registry)
+            assertNotNull(registry["source_register_tool"])
+        } finally {
+            ScriptManager.unloadScript(scriptName, registry)
+        }
+    }
+
     // ─── 循环依赖检测 ────────────────────────────────────────
 
     @Test

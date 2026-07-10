@@ -1,6 +1,7 @@
 package org.example.vicky.mcp
 
 import io.ktor.client.HttpClient
+import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.sse.SSE
 import io.modelcontextprotocol.kotlin.sdk.client.Client
 import io.modelcontextprotocol.kotlin.sdk.client.StdioClientTransport
@@ -9,8 +10,8 @@ import io.modelcontextprotocol.kotlin.sdk.types.Implementation
 import kotlinx.io.asSink
 import kotlinx.io.asSource
 import kotlinx.io.buffered
+import org.example.vicky.platform.RuntimePlatform
 import org.example.vicky.tool.ToolRegistry
-import org.slf4j.LoggerFactory
 
 /**
  * MCP 客户端管理器。
@@ -20,7 +21,6 @@ import org.slf4j.LoggerFactory
  */
 class McpClientManager : AutoCloseable {
 
-    private val logger = LoggerFactory.getLogger(McpClientManager::class.java)
     private val connections = mutableListOf<Pair<Client, String>>() // client to serverName
     private var httpClient: HttpClient? = null
 
@@ -32,6 +32,9 @@ class McpClientManager : AutoCloseable {
      * @param serverName 服务器名称，用于标识工具来源
      */
     suspend fun connectStdio(command: String, args: List<String> = emptyList(), serverName: String = "") {
+        check(!RuntimePlatform.isAndroid) {
+            "MCP stdio transport is not supported on Android; use connectHttp() instead."
+        }
         val pb = ProcessBuilder(listOf(command) + args)
         val process = pb.start()
 
@@ -46,7 +49,6 @@ class McpClientManager : AutoCloseable {
         )
         client.connect(transport)
         connections.add(client to serverName)
-        logger.info("MCP connected (stdio): $serverName -> $command ${args.joinToString(" ")}")
     }
 
     /**
@@ -56,7 +58,7 @@ class McpClientManager : AutoCloseable {
      * @param serverName 服务器名称
      */
     suspend fun connectHttp(url: String, serverName: String = "") {
-        val hc = httpClient ?: HttpClient { install(SSE) }.also { httpClient = it }
+        val hc = httpClient ?: HttpClient(OkHttp) { install(SSE) }.also { httpClient = it }
 
         val transport = StreamableHttpClientTransport(
             client = hc,
@@ -68,7 +70,6 @@ class McpClientManager : AutoCloseable {
         )
         client.connect(transport)
         connections.add(client to serverName)
-        logger.info("MCP connected (http): $serverName -> $url")
     }
 
     /**
@@ -80,9 +81,7 @@ class McpClientManager : AutoCloseable {
             for (mcpTool in toolsResult.tools) {
                 val vickyTool = McpTool(client, mcpTool, serverName)
                 registry.register(vickyTool)
-                logger.info("MCP tool registered: ${mcpTool.name} (from $serverName)")
             }
-            logger.info("MCP server '$serverName': ${toolsResult.tools.size} tools registered")
         }
     }
 
