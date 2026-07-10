@@ -4,7 +4,11 @@ import com.aallam.openai.api.chat.ChatCompletionRequest
 import com.aallam.openai.api.chat.ChatMessage
 import com.aallam.openai.api.chat.ChatRole
 import com.aallam.openai.api.chat.ToolCall
+import com.aallam.openai.api.chat.ToolType
+import com.aallam.openai.api.chat.FunctionTool
+import com.aallam.openai.api.core.Parameters
 import com.aallam.openai.client.OpenAI
+import kotlinx.serialization.json.Json
 import org.example.vicky.context.ContextManager
 import org.example.vicky.io.InboundMessage
 import org.example.vicky.io.MessageSink
@@ -195,7 +199,7 @@ abstract class Agent(
                         tools = fullSchemaTools.takeIf { it.isNotEmpty() },
                         temperature = config.temperature,
                     )
-                    val cr2 = completeChat(req2, onDebug = if (config.debug) { s -> log(s) } else null)
+                    val cr2 = ChatCompletionRunner(openAi, config).complete(req2, onDebug = if (config.debug) { s -> log(s) } else null)
                     sess.contextTokens += cr2.promptTokens
                     sess.usedTokens += cr2.completionTokens
                     emit(OutboundMessage.TokenUsage(msg.conversationId, msg.userId, msg.groupId, cr2.promptTokens, cr2.completionTokens, sess.usedTokens))
