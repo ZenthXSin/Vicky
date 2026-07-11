@@ -166,10 +166,12 @@ class JVectorStore(dataDir: File = File("data/vector")) : VectorStore {
         collection: String,
         limit: Int,
         filter: Map<String, Any>?,
+        offset: Int,
     ): List<VectorRecord> = mutex.withLock {
         val state = collections[collection] ?: return@withLock emptyList()
         state.payloads.entries
             .filter { (_, p) -> filter == null || matchesFilter(p, filter) }
+            .drop(offset)
             .take(limit)
             .map { (id, p) ->
                 val vec = state.idToIndex[id]?.let { state.vectors[it] } ?: floatArrayOf()
@@ -181,10 +183,12 @@ class JVectorStore(dataDir: File = File("data/vector")) : VectorStore {
         collection: String,
         limit: Int,
         filter: Map<String, Any>?,
+        offset: Int,
     ): List<VectorRecord> = mutex.withLock {
         val state = collections[collection] ?: return@withLock emptyList()
         state.payloads.entries
             .filter { (_, p) -> filter == null || matchesFilter(p, filter) }
+            .drop(offset)
             .take(limit)
             .map { (id, p) -> VectorRecord(id, floatArrayOf(), p) }
     }

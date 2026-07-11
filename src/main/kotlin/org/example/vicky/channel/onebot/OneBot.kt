@@ -1,11 +1,6 @@
 package org.example.vicky.channel.onebot
 
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.withLock
 import net.mamoe.mirai.Bot
 import net.mamoe.mirai.contact.Group
 import net.mamoe.mirai.contact.nameCardOrNick
@@ -31,20 +26,21 @@ import org.example.vicky.context.DefaultContextManager
 import org.example.vicky.buffer.BufferedMessage
 import org.example.vicky.buffer.MessageBuffer
 import org.example.vicky.buffer.RichMediaItem
-import org.example.vicky.file.FileIndexService
 import org.example.vicky.generated.ToolRegistry
 import org.example.vicky.io.InboundMessage
 import org.example.vicky.io.MessageSink
 import org.example.vicky.io.OutboundMessage
-import org.example.vicky.llm.EmbeddingClientFactory
 import org.example.vicky.llm.OpenAiClientFactory
-import org.example.vicky.memory.Distiller
-import org.example.vicky.memory.DistillationScheduler
-import org.example.vicky.memory.QdrantMemoryStore
+import org.example.vicky.memory.MemoryRuntime
 import org.example.vicky.memory.RawMemory
 import org.example.vicky.session.SessionStore
 import org.example.vicky.session.SqliteSessionStore
 import org.example.vicky.tool.ToolAuthorizer
+import org.example.vicky.vibe.agent.VibeAgentMode
+import org.example.vicky.vibe.orchestrator.VibeSystemPromptBuilder
+import org.example.vicky.vibe.turn.VibeTurnRequest
+import org.example.vicky.vibe.turn.VibeTurnResult
+import org.example.vicky.vibe.turn.VibeTurnRunner
 import top.mrxiaom.overflow.BotBuilder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -132,6 +128,23 @@ class OneBot(
         org.example.vicky.command.ScriptCommands.all(scriptsDir, agent.tools)
             .forEach { commandRegistry.register(it) }
         commandRegistry.register(org.example.vicky.command.ContextInfoCommand.create(agent))
+        commandRegistry.register(org.example.vicky.command.command("vibe", "使用 root 上下文运行 Vibe") { ctx, args ->
+            val request = args.trim()
+            if (request.isEmpty()) {
+                return@command org.example.vicky.command.CommandResult(reply = "用法: /vibe <任务>")
+            }
+            val inbound = InboundMessage(
+                userId = ctx.userId,
+                content = request,
+                conversationId = ctx.conversationId,
+                groupId = ctx.groupId,
+            )
+            val result = agent.runVibe(inbound)
+            if (!result.success && result.assistantReply.isNullOrBlank()) {
+                return@command org.example.vicky.command.CommandResult(reply = "Vibe 执行失败: ${result.error ?: "unknown"}")
+            }
+            org.example.vicky.command.CommandResult(reply = null, passthrough = false)
+        })
         registerListeners()
         return true
     }
@@ -418,81 +431,37 @@ class OneBot(
         )
 
         private var toolManagementTool: org.example.vicky.tool.builtin.ToolManagementTool? = null
-        private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-
-        // 语义记忆组件
-        private var vectorStore: org.example.vicky.vector.VectorStore? = null
-        private var memoryStore: QdrantMemoryStore? = null
-        private var fileIndexService: FileIndexService? = null
-        private var distillationScheduler: DistillationScheduler? = null
+        private var memoryRuntime: MemoryRuntime? = null
         private val memoryCircuitBreaker = org.example.vicky.vector.CircuitBreaker(failureThreshold = 3, cooldownMs = 120_000)
-        @Volatile private var memoryReady = false
 
         override fun initMemory() {
-            val embeddingClient = memConfig.embedding?.let { EmbeddingClientFactory.create(it) } ?: return
-            val dimText = if (embeddingClient.dimension > 0) "维度: ${embeddingClient.dimension}" else "维度: 待首次调用确定"
-            println("[Vicky] 语义模型已加载（$dimText）")
-
-            val dataDir = java.io.File(memConfig.vectorStoreDataDir)
-            vectorStore = org.example.vicky.vector.JVectorStore(dataDir)
-            println("[Vicky] 向量存储已初始化 (JVector): ${dataDir.absolutePath}")
-
-            memoryStore = QdrantMemoryStore(
-                vectorStore!!, embeddingClient,
-                memConfig.memoryCollection, memConfig.memoryRawCollection,
-                memConfig.memoryRawRetentionDays.toLong(),
-                memConfig.memoryDistilledRetentionDays.toLong(),
-                memConfig.memoryExpiryDays.toLong(),
+            val runtime = MemoryRuntime.create(memConfig, config)
+            if (runtime.memoryStore == null) return
+            memoryRuntime = runtime
+            bindBuiltinTools()
+            runtime.startWarmup(
+                memoryConfig = memConfig,
+                onFailure = { e -> println("[Vicky] 记忆系统初始化失败: ${e.message}") },
             )
+        }
 
-            if (memConfig.fileIndexEnabled) {
-                fileIndexService = FileIndexService(
-                    vectorStore!!, embeddingClient,
-                    java.io.File(System.getProperty("user.dir")),
-                    memConfig.fileIndexCollection,
-                    memConfig.fileIndexChunkSize,
-                    memConfig.fileIndexChunkOverlap,
-                    memConfig.fileIndexIgnorePatterns,
-                    memConfig.fileIndexPaths,
-                )
-            }
-
-            if (memConfig.distillationEnabled) {
-                val openAi = org.example.vicky.llm.OpenAiClientFactory.create(config)
-                val distiller = Distiller(openAi, embeddingClient, config.model)
-                distillationScheduler = DistillationScheduler(memoryStore!!, distiller, memConfig.distillationMaxConversations, true)
-            }
-
-            println("[Vicky] 记忆系统后台初始化中，完成前记忆功能禁用...")
-            scope.launch(Dispatchers.IO) {
-                try {
-                    embeddingClient.embed("warmup")
-                    memoryReady = true
-                    println("[Vicky] 记忆系统已就绪（topK: ${memConfig.memoryTopK}, tokenBudget: ${memConfig.memoryTokenBudget}）")
-                    distillationScheduler?.also { it.start(); println("[Vicky] 蒸馏调度器已启动") }
-                    if (fileIndexService != null && memConfig.fileIndexAutoIndexOnStart) {
-                        println("[Vicky] 开始后台索引文件...")
-                        try {
-                            val result = fileIndexService!!.indexAll { current, success, skipped ->
-                                print("\r[Vicky] 索引中: 已处理 $current 个文件，$success 个已索引，$skipped 个已跳过")
-                            }
-                            println("\n[Vicky] 文件索引完成: ${result.newFiles} 个新增，${result.updatedFiles} 个更新，${result.skippedFiles} 个跳过")
-                        } catch (e: Exception) {
-                            println("\n[Vicky] 文件索引失败: ${e.message}")
-                        }
-                    }
-                } catch (e: Exception) {
-                    println("[Vicky] 记忆系统初始化失败: ${e.message}")
-                }
-            }
+        private fun bindBuiltinTools() {
+            if (!config.builtinTools) return
+            val baseDir = java.io.File(System.getProperty("user.dir"))
+            val runtime = memoryRuntime
+            org.example.vicky.tool.builtin.BuiltinTools.all(
+                baseDir = baseDir,
+                memoryStore = runtime?.memoryStore,
+                fileIndexService = runtime?.fileIndexService,
+                distillationScheduler = runtime?.distillationScheduler,
+                agentConfig = config,
+            ).forEach { tools.register(it) }
         }
 
         override fun initTools() {
             super.initTools()
             if (config.builtinTools) {
-                val baseDir = java.io.File(System.getProperty("user.dir"))
-                org.example.vicky.tool.builtin.BuiltinTools.all(baseDir, memoryStore, fileIndexService, distillationScheduler, agentConfig = config)
-                    .forEach { tools.register(it) }
+                bindBuiltinTools()
                 toolManagementTool = org.example.vicky.tool.builtin.ToolManagementTool { onToolStatesChanged() }
                 tools.register(toolManagementTool!!)
                 tools.register(org.example.vicky.tool.builtin.InvokeSkillTool())
@@ -539,11 +508,12 @@ class OneBot(
         }
 
         override suspend fun onTurnStart(msg: InboundMessage, history: MutableList<ChatMessage>) {
-            if (memoryStore == null || !memConfig.memoryEnabled || !memoryReady) return
+            val store = memoryRuntime?.memoryStore ?: return
+            if (!memConfig.memoryEnabled || memoryRuntime?.ready != true) return
             if (!memoryCircuitBreaker.allowRequest()) return
             try {
                 val memories = kotlinx.coroutines.withTimeout(30_000) {
-                    memoryStore!!.recall(msg.content, msg.userId, memConfig.memoryTopK)
+                    store.recall(msg.content, msg.userId, memConfig.memoryTopK)
                 }
                 memoryCircuitBreaker.recordSuccess()
                 if (memories.isNotEmpty()) {
@@ -572,7 +542,8 @@ class OneBot(
         }
 
         override suspend fun onTurnEnd(msg: InboundMessage, assistantReply: String?) {
-            if (memoryStore == null || !memConfig.memoryEnabled || !memoryReady) return
+            val store = memoryRuntime?.memoryStore ?: return
+            if (!memConfig.memoryEnabled || memoryRuntime?.ready != true) return
             if (!memoryCircuitBreaker.allowRequest()) return
             try {
                 kotlinx.coroutines.withTimeout(30_000) {
@@ -582,7 +553,7 @@ class OneBot(
                         rawMemories.add(RawMemory(userId = msg.userId, conversationId = msg.conversationId, role = "assistant", content = assistantReply))
                     }
                     for (raw in rawMemories) {
-                        memoryStore!!.rememberRaw(raw)
+                        store.rememberRaw(raw)
                     }
                 }
                 memoryCircuitBreaker.recordSuccess()
@@ -593,6 +564,68 @@ class OneBot(
                 memoryCircuitBreaker.recordFailure()
                 println("[Vicky] 原始记忆保存失败 (${e::class.simpleName}): ${e.message}")
                 if (config.debug) e.printStackTrace()
+            }
+        }
+
+        suspend fun runVibe(inbound: InboundMessage): VibeTurnResult {
+            val sess = session(inbound.conversationId)
+            return sess.mutex.withLock {
+                val history = contextManager.history(inbound.conversationId)
+                if (!sess.historyLoaded) {
+                    sess.historyLoaded = true
+                    val persisted = sess.loadHistory()
+                    if (persisted.isNotEmpty() && history.isEmpty()) {
+                        history.addAll(persisted)
+                    }
+                }
+
+                val rootPrompt = contextManager.buildSystemPrompt(config.mode, tools)
+                val vibeRootPrompt = contextManager.buildSystemPrompt(VibeAgentMode, tools)
+                val vibePrompt = "$vibeRootPrompt\n\n${VibeSystemPromptBuilder.build()}"
+                if (history.isEmpty() || history.first().role != ChatRole.System) {
+                    history.add(0, ChatMessage(role = ChatRole.System, content = vibePrompt))
+                } else {
+                    history[0] = ChatMessage(role = ChatRole.System, content = vibePrompt)
+                }
+
+                var result = VibeTurnResult(null, emptyList(), 0, 0, success = false, error = "not started")
+                try {
+                    onTurnStart(inbound, history)
+                    val vibeSink = MessageSink { out ->
+                        sink.emit(out)
+                        onMessageEmitted(out)
+                    }
+                    result = VibeTurnRunner().run(
+                        VibeTurnRequest(
+                            config = config.copy(
+                                mode = VibeAgentMode,
+                                agentMd = vibePrompt,
+                                maxSteps = maxOf(config.maxSteps, 16),
+                            ),
+                            inbound = inbound,
+                            tools = tools,
+                            contextManager = contextManager,
+                            authorizer = authorizer,
+                            sink = vibeSink,
+                            buffer = buffer,
+                            resetContext = false,
+                        ),
+                    )
+                    sess.contextTokens += result.promptTokens
+                    sess.usedTokens += result.completionTokens
+                    result
+                } finally {
+                    val restoredPrompt = contextManager.buildSystemPrompt(config.mode, tools).ifBlank { rootPrompt }
+                    if (history.isEmpty() || history.first().role != ChatRole.System) {
+                        history.add(0, ChatMessage(role = ChatRole.System, content = restoredPrompt))
+                    } else {
+                        history[0] = ChatMessage(role = ChatRole.System, content = restoredPrompt)
+                    }
+                    contextManager.compactOldToolRounds(history)
+                    onTurnEnd(inbound, result.assistantReply)
+                    contextManager.trimIfNeeded(inbound.conversationId)
+                    sess.flush(history)
+                }
             }
         }
 
@@ -612,9 +645,7 @@ class OneBot(
 
         override fun close() {
             super.close()
-            distillationScheduler?.stop()
-            scope.cancel()
-            vectorStore?.close()
+            memoryRuntime?.close()
         }
 
         private suspend fun sendSmart(target: net.mamoe.mirai.contact.Contact, text: String) {
@@ -661,6 +692,8 @@ class OneBot(
                 is OutboundMessage.Debug -> { println("DEBUG: ${out.content}") }
                 is OutboundMessage.Think -> { println("THINK: ${out.content}") }
                 is OutboundMessage.TokenUsage -> { println("[llm] ${out.content}") }
+                is OutboundMessage.AgentReplyDelta -> {}
+                is OutboundMessage.AgentReplyDone -> {}
             }
         }
 

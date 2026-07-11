@@ -83,7 +83,7 @@ kotlin {
 }
 
 application {
-    mainClass.set("org.example.vicky.examples.ConsoleMainKt")
+    mainClass.set("org.example.vicky.examples.MainKt")
     applicationDefaultJvmArgs = listOf("--add-modules", "jdk.incubator.vector")
 }
 
@@ -98,7 +98,7 @@ tasks.shadowJar {
     archiveClassifier.set("")
     mergeServiceFiles()
     manifest {
-        attributes("Main-Class" to "org.example.vicky.examples.ConsoleMainKt")
+        attributes("Main-Class" to "org.example.vicky.examples.MainKt")
     }
 }
 

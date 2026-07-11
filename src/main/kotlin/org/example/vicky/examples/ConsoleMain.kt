@@ -32,7 +32,7 @@ object ConsoleTools {
     }
 }
 
-fun main() = runBlocking {
+fun consoleMain() = runBlocking {
     System.setOut(java.io.PrintStream(System.out, true, Charsets.UTF_8))
 
     val result = ConfigManager.loadOrCreate()
@@ -88,6 +88,8 @@ fun main() = runBlocking {
             is OutboundMessage.Debug -> println("[debug] ${out.content}")
             is OutboundMessage.Think -> println("[think] ${out.content}")
             is OutboundMessage.TokenUsage -> println("[llm] ${out.content}")
+            is OutboundMessage.AgentReplyDelta -> print(out.content)
+            is OutboundMessage.AgentReplyDone -> println()
         }
     }
 

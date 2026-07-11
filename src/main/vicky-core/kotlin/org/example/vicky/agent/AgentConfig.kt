@@ -35,6 +35,9 @@ data class AgentConfig(
     // 会话存储限制
     val conversationStoreMaxConversations: Int = 500,
     val conversationStoreMaxMessages: Int = 200,
+    val sessionMaxActive: Int = 500,
+    val sessionIdleTtlMs: Long = 3_600_000L,
+    val sessionCleanupIntervalMs: Long = 60_000L,
     // 消息缓冲区限制
     val messageBufferMaxGlobalEntries: Int = 10000,
     val messageBufferRawTruncate: Int = 500,

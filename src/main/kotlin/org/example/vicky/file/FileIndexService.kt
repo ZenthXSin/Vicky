@@ -75,19 +75,18 @@ class FileIndexService(
      * 从 Qdrant 加载已索引文件的缓存。分页加载，避免大集合 OOM。
      */
     private suspend fun loadIndexCache() {
-        var loaded = 0
+        var offset = 0
         while (true) {
-            val batch = vectorStore.scrollPayloadOnly(collectionName, 1000, null)
+            val batch = vectorStore.scrollPayloadOnly(collectionName, 1000, null, offset)
             if (batch.isEmpty()) break
             for (record in batch) {
                 val path = record.payload["path"] as? String ?: continue
                 val lastModified = (record.payload["last_modified"] as? Double)?.toLong() ?: 0L
                 indexedFiles[path] = lastModified
             }
-            loaded += batch.size
+            offset += batch.size
             if (batch.size < 1000) break
         }
-        println("[Vicky] Loaded ${indexedFiles.size} indexed files from cache")
     }
 
     /**
@@ -128,8 +127,7 @@ class FileIndexService(
                                 IndexAction.UPDATED -> updatedIndexCount.incrementAndGet()
                                 IndexAction.SKIPPED -> skippedCount.incrementAndGet()
                             }
-                        } catch (e: Exception) {
-                            println("[Vicky] 索引文件失败: $relativePath: ${e.message}")
+                        } catch (_: Exception) {
                         }
                         val current = currentIndex.incrementAndGet()
                         onProgress?.invoke(current, newIndexCount.get() + updatedIndexCount.get(), skippedCount.get())

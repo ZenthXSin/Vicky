@@ -18,6 +18,7 @@ class DefaultStatusPanel : StatusPanel {
 
     // 内部状态
     private val stageStates = mutableListOf<StageState>()
+    private val tasks = linkedMapOf<String, VibeTask>()
     private var pipelineStartTime: Long = 0L
     private var title: String = "Pipeline"
 
@@ -52,7 +53,7 @@ class DefaultStatusPanel : StatusPanel {
                     else 0L,
                 )
             },
-            tasks = emptyList(), // 由 Orchestrator 注入
+            tasks = tasks.values.sortedBy { it.createdAt },
             elapsed = elapsed,
         )
     }
@@ -63,6 +64,7 @@ class DefaultStatusPanel : StatusPanel {
         this.title = title
         this.pipelineStartTime = System.currentTimeMillis()
         this.stageStates.clear()
+        this.tasks.clear()
         stages.forEachIndexed { i, stage ->
             stageStates.add(StageState(stage = stage, index = i))
         }
@@ -86,6 +88,7 @@ class DefaultStatusPanel : StatusPanel {
     }
 
     fun notifyTaskUpdate(task: VibeTask) {
+        tasks[task.id] = task
         observers.forEach { it.onTaskUpdate(task) }
     }
 

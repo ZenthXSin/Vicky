@@ -69,6 +69,9 @@ data class MemoryConfigData(
     val fileIndexAutoIndexOnStart: Boolean = true,
     val conversationStoreMaxConversations: Int = 500,
     val conversationStoreMaxMessages: Int = 200,
+    val sessionMaxActive: Int = 500,
+    val sessionIdleTtlMs: Long = 3_600_000L,
+    val sessionCleanupIntervalMs: Long = 60_000L,
     val messageBufferMaxGlobalEntries: Int = 10000,
     val messageBufferRawTruncate: Int = 500,
 )
@@ -305,6 +308,9 @@ object ConfigManager {
             toolStates = configData.toolStates,
             conversationStoreMaxConversations = memory.conversationStoreMaxConversations,
             conversationStoreMaxMessages = memory.conversationStoreMaxMessages,
+            sessionMaxActive = memory.sessionMaxActive,
+            sessionIdleTtlMs = memory.sessionIdleTtlMs,
+            sessionCleanupIntervalMs = memory.sessionCleanupIntervalMs,
             messageBufferMaxGlobalEntries = memory.messageBufferMaxGlobalEntries,
             messageBufferRawTruncate = memory.messageBufferRawTruncate,
         )

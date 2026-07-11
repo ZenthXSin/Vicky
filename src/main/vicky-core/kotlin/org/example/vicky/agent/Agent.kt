@@ -3,11 +3,12 @@ package org.example.vicky.agent
 import com.aallam.openai.api.chat.ChatCompletionRequest
 import com.aallam.openai.api.chat.ChatMessage
 import com.aallam.openai.api.chat.ChatRole
+import com.aallam.openai.api.chat.FunctionTool
 import com.aallam.openai.api.chat.ToolCall
 import com.aallam.openai.api.chat.ToolType
-import com.aallam.openai.api.chat.FunctionTool
 import com.aallam.openai.api.core.Parameters
 import com.aallam.openai.client.OpenAI
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.example.vicky.context.ContextManager
 import org.example.vicky.io.InboundMessage
@@ -42,6 +43,7 @@ abstract class Agent(
 
     private var memoryInitialized = false
     private val sessions = ConcurrentHashMap<String, Session>()
+    @Volatile private var lastSessionCleanupAt: Long = 0L
 
     init {
         AgentManager.register(this)
@@ -97,13 +99,16 @@ abstract class Agent(
         return result
     }
 
-    fun session(conversationId: String): Session =
-        sessions.getOrPut(conversationId) { Session(conversationId, sessionStore, this) }
+    fun session(conversationId: String): Session {
+        val now = System.currentTimeMillis()
+        cleanupIdleSessions(now)
+        return sessions.getOrPut(conversationId) { Session(conversationId, sessionStore, this) }
+            .also { it.touch(now) }
+    }
 
     suspend fun clearContext(conversationId: String) {
         contextManager.clear(conversationId)
-        session(conversationId).delete()
-        sessions.remove(conversationId)
+        sessions.remove(conversationId)?.delete() ?: sessionStore?.deleteHistory(conversationId)
     }
 
     /**
@@ -183,7 +188,15 @@ abstract class Agent(
                     tools = oaiToolsMinimal.takeIf { it.isNotEmpty() },
                     temperature = config.temperature,
                 )
-                val cr = ChatCompletionRunner(openAi, config).complete(request, onDebug = if (config.debug) { s -> log(s) } else null)
+                var streamedReply = false
+                val cr = ChatCompletionRunner(openAi, config).complete(
+                    request,
+                    onDebug = if (config.debug) { s -> log(s) } else null,
+                    onDelta = { delta ->
+                        streamedReply = true
+                        emit(OutboundMessage.AgentReplyDelta(msg.conversationId, msg.userId, msg.groupId, delta))
+                    },
+                )
                 sess.contextTokens += cr.promptTokens
                 sess.usedTokens += cr.completionTokens
                 emit(OutboundMessage.TokenUsage(msg.conversationId, msg.userId, msg.groupId, cr.promptTokens, cr.completionTokens, sess.usedTokens))
@@ -199,7 +212,15 @@ abstract class Agent(
                         tools = fullSchemaTools.takeIf { it.isNotEmpty() },
                         temperature = config.temperature,
                     )
-                    val cr2 = ChatCompletionRunner(openAi, config).complete(req2, onDebug = if (config.debug) { s -> log(s) } else null)
+                    streamedReply = false
+                    val cr2 = ChatCompletionRunner(openAi, config).complete(
+                        req2,
+                        onDebug = if (config.debug) { s -> log(s) } else null,
+                        onDelta = { delta ->
+                            streamedReply = true
+                            emit(OutboundMessage.AgentReplyDelta(msg.conversationId, msg.userId, msg.groupId, delta))
+                        },
+                    )
                     sess.contextTokens += cr2.promptTokens
                     sess.usedTokens += cr2.completionTokens
                     emit(OutboundMessage.TokenUsage(msg.conversationId, msg.userId, msg.groupId, cr2.promptTokens, cr2.completionTokens, sess.usedTokens))
@@ -223,8 +244,13 @@ abstract class Agent(
                     log("step ${step + 1}: no tool calls, finishing")
                     assistantReply = assistant.content
                     if (config.mode.emitAgentText) {
-                        assistant.content?.takeIf { it.isNotBlank() }?.let {
-                            emit(OutboundMessage.AgentReply(msg.conversationId, msg.userId, msg.groupId, it))
+                        val content = assistant.content.orEmpty()
+                        if (streamedReply) {
+                            emit(OutboundMessage.AgentReplyDone(msg.conversationId, msg.userId, msg.groupId))
+                        } else {
+                            content.takeIf { it.isNotBlank() }?.let {
+                                emit(OutboundMessage.AgentReply(msg.conversationId, msg.userId, msg.groupId, it))
+                            }
                         }
                     }
                     return
@@ -284,6 +310,7 @@ abstract class Agent(
             history += wrapUpPrompt
             wrapUpMessage = wrapUpPrompt
             contextManager.ensureContextBudget(history)
+            var wrapUpStreamedReply = false
             val wrapUpCr = ChatCompletionRunner(openAi, config).complete(
                 ChatCompletionRequest(
                     model = config.model,
@@ -291,6 +318,10 @@ abstract class Agent(
                     temperature = config.temperature,
                 ),
                 onDebug = if (config.debug) { s -> log(s) } else null,
+                onDelta = { delta ->
+                    wrapUpStreamedReply = true
+                    emit(OutboundMessage.AgentReplyDelta(msg.conversationId, msg.userId, msg.groupId, delta))
+                },
             )
             sess.contextTokens += wrapUpCr.promptTokens
             sess.usedTokens += wrapUpCr.completionTokens
@@ -300,7 +331,11 @@ abstract class Agent(
             val wrapUpContent = wrapUp.content?.takeIf { it.isNotBlank() }
                 ?: "[已达到最大步数限制，无法生成完整回复。]"
             assistantReply = wrapUpContent
-            emit(OutboundMessage.AgentReply(msg.conversationId, msg.userId, msg.groupId, wrapUpContent))
+            if (wrapUpStreamedReply) {
+                emit(OutboundMessage.AgentReplyDone(msg.conversationId, msg.userId, msg.groupId))
+            } else {
+                emit(OutboundMessage.AgentReply(msg.conversationId, msg.userId, msg.groupId, wrapUpContent))
+            }
         } catch (e: Throwable) {
             log("receive() failed: ${e::class.simpleName}: ${e.message}")
             if (config.debug) e.printStackTrace()
@@ -323,12 +358,12 @@ abstract class Agent(
 
             if (clearContextAfter) {
                 contextManager.clear(msg.conversationId)
-                session(msg.conversationId).delete()
+                sess.delete()
                 sessions.remove(msg.conversationId)
                 log("cleared context for '${msg.conversationId}' after reply")
             } else {
                 contextManager.trimIfNeeded(msg.conversationId)
-                session(msg.conversationId).flush(history)
+                sess.flush(history)
             }
         }
     }
@@ -495,8 +530,29 @@ abstract class Agent(
         }
     }
 
+    private fun cleanupIdleSessions(now: Long = System.currentTimeMillis()) {
+        val interval = config.sessionCleanupIntervalMs.coerceAtLeast(1L)
+        if (now - lastSessionCleanupAt < interval) return
+        lastSessionCleanupAt = now
+
+        val idleTtl = config.sessionIdleTtlMs
+        if (idleTtl > 0) {
+            sessions.entries.removeIf { (_, session) -> now - session.lastAccessedAt > idleTtl }
+        }
+
+        val maxActive = config.sessionMaxActive
+        if (maxActive > 0 && sessions.size > maxActive) {
+            sessions.entries
+                .sortedBy { it.value.lastAccessedAt }
+                .take(sessions.size - maxActive)
+                .forEach { sessions.remove(it.key) }
+        }
+    }
+
     override fun close() {
         AgentManager.unregister(id)
+        sessions.clear()
+        sessionStore?.close()
     }
 
     private data class CompletionResult(

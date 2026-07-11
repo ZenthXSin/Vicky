@@ -15801,6 +15801,7 @@ interface InMemoryTaskGraphInterface {
     create(arg0: string, arg1: AgentRole, arg2: any[]): VibeTask;
     all(): any[];
     ready(): any[];
+    clear(): void;
 }
 
 interface InMemoryTaskGraph extends InMemoryTaskGraphInterface {}
@@ -34322,6 +34323,7 @@ interface TaskGraphInterface {
     create(arg0: string, arg1: AgentRole, arg2: any[]): VibeTask;
     all(): any[];
     ready(): any[];
+    clear(): void;
 }
 
 interface TaskGraph extends TaskGraphInterface {}

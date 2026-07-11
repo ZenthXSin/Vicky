@@ -15,6 +15,22 @@ sealed interface OutboundMessage {
         override val type: String = "AgentReply",
     ) : OutboundMessage
 
+    data class AgentReplyDelta(
+        override val conversationId: String,
+        override val userId: String,
+        override val groupId: String = "",
+        override val content: String,
+        override val type: String = "AgentReplyDelta",
+    ) : OutboundMessage
+
+    data class AgentReplyDone(
+        override val conversationId: String,
+        override val userId: String,
+        override val groupId: String = "",
+        override val content: String = "",
+        override val type: String = "AgentReplyDone",
+    ) : OutboundMessage
+
     data class ToolReply(
         override val conversationId: String,
         override val userId: String,

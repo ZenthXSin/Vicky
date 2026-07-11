@@ -13,6 +13,7 @@ import org.example.vicky.vibe.tool.VibeToolUse
 import org.example.vicky.vibe.tool.VibeToolUseQueue
 import org.example.vicky.vibe.turn.VibeTurnRequest
 import org.example.vicky.vibe.turn.VibeTurnResult
+import kotlin.coroutines.cancellation.CancellationException
 
 class VibeMessagePipeline(
     private val request: VibeTurnRequest,
@@ -35,6 +36,8 @@ class VibeMessagePipeline(
         var assistantReply: String? = null
         var stepCount = 0
         var wrapUpMessage: ChatMessage? = null
+        var pendingToolContinuationReminder = false
+        var replyStreamOpen = false
 
         suspend fun emitDebug(message: String) {
             if (request.config.debug) {
@@ -53,14 +56,20 @@ class VibeMessagePipeline(
                 stepCount = step + 1
                 request.contextManager.ensureContextBudget(history)
                 emitDebug("vibe step ${step + 1}/${request.config.maxSteps} -> requesting completion (${history.size} msgs)")
+                var stepStreamed = false
                 val completion = completionRunner.complete(
                     ChatCompletionRequest(
                         model = request.config.model,
-                        messages = history.toList(),
+                        messages = messagesForCompletion(history, request.inbound.content, pendingToolContinuationReminder),
                         tools = oaiTools.takeIf { it.isNotEmpty() },
                         temperature = request.config.temperature,
                     ),
                     onDebug = if (request.config.debug) { s -> emitDebug(s) } else null,
+                    onDelta = { delta ->
+                        stepStreamed = true
+                        replyStreamOpen = true
+                        request.sink.emit(OutboundMessage.AgentReplyDelta(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId, delta))
+                    },
                 )
                 promptTokens += completion.promptTokens
                 completionTokens += completion.completionTokens
@@ -75,6 +84,7 @@ class VibeMessagePipeline(
                     ),
                 )
 
+                pendingToolContinuationReminder = false
                 val assistant = completion.message
                 history += assistant
                 var calls = assistant.toolCalls.orEmpty().filterIsInstance<ToolCall.Function>()
@@ -86,14 +96,24 @@ class VibeMessagePipeline(
                 if (calls.isEmpty()) {
                     assistantReply = assistant.content
                     if (request.config.mode.emitAgentText) {
-                        assistantReply?.takeIf { it.isNotBlank() }?.let {
-                            request.sink.emit(OutboundMessage.AgentReply(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId, it))
+                        if (stepStreamed) {
+                            request.sink.emit(OutboundMessage.AgentReplyDone(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId))
+                            replyStreamOpen = false
+                        } else {
+                            assistantReply?.takeIf { it.isNotBlank() }?.let {
+                                request.sink.emit(OutboundMessage.AgentReply(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId, it))
+                            }
                         }
                     }
                     return VibeTurnResult(assistantReply, toolUses, promptTokens, completionTokens, success = true, stepCount = stepCount)
                 }
 
-                assistant.content?.takeIf { it.isNotBlank() }?.let { emitThink(it) }
+                if (stepStreamed) {
+                    request.sink.emit(OutboundMessage.AgentReplyDone(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId))
+                    replyStreamOpen = false
+                } else {
+                    assistant.content?.takeIf { it.isNotBlank() }?.let { emitThink(it) }
+                }
                 for (call in calls) emitThink("Use Tool: ${call.function.name}")
 
                 val queue = VibeToolUseQueue(
@@ -106,6 +126,7 @@ class VibeMessagePipeline(
                 val toolResult = queue.execute(calls)
                 history += toolResult.messages
                 toolUses += toolResult.toolUses
+                pendingToolContinuationReminder = true
                 request.contextManager.ensureContextBudget(history)
                 if (toolResult.endTurn) {
                     assistantReply = assistant.content
@@ -120,6 +141,7 @@ class VibeMessagePipeline(
             )
             history += wrapUpPrompt
             wrapUpMessage = wrapUpPrompt
+            var wrapUpStreamed = false
             val wrapUp = completionRunner.complete(
                 ChatCompletionRequest(
                     model = request.config.model,
@@ -127,16 +149,36 @@ class VibeMessagePipeline(
                     temperature = request.config.temperature,
                 ),
                 onDebug = if (request.config.debug) { s -> emitDebug(s) } else null,
+                onDelta = { delta ->
+                    wrapUpStreamed = true
+                    replyStreamOpen = true
+                    request.sink.emit(OutboundMessage.AgentReplyDelta(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId, delta))
+                },
             )
             promptTokens += wrapUp.promptTokens
             completionTokens += wrapUp.completionTokens
             history += wrapUp.message
             assistantReply = wrapUp.message.content
-            assistantReply?.takeIf { it.isNotBlank() }?.let {
-                request.sink.emit(OutboundMessage.AgentReply(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId, it))
+            if (wrapUpStreamed) {
+                request.sink.emit(OutboundMessage.AgentReplyDone(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId))
+                replyStreamOpen = false
+            } else {
+                assistantReply?.takeIf { it.isNotBlank() }?.let {
+                    request.sink.emit(OutboundMessage.AgentReply(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId, it))
+                }
             }
             VibeTurnResult(assistantReply, toolUses, promptTokens, completionTokens, success = false, error = "maxSteps exhausted", stepCount = stepCount)
+        } catch (e: CancellationException) {
+            if (replyStreamOpen) {
+                request.sink.emit(OutboundMessage.AgentReplyDone(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId))
+                replyStreamOpen = false
+            }
+            throw e
         } catch (e: Throwable) {
+            if (replyStreamOpen) {
+                request.sink.emit(OutboundMessage.AgentReplyDone(request.inbound.conversationId, request.inbound.userId, request.inbound.groupId))
+                replyStreamOpen = false
+            }
             emitDebug("vibe failed: ${e::class.simpleName}: ${e.message}")
             VibeTurnResult(assistantReply, toolUses, promptTokens, completionTokens, success = false, error = "${e::class.simpleName}: ${e.message}", stepCount = stepCount)
         } finally {
@@ -144,5 +186,17 @@ class VibeMessagePipeline(
             request.contextManager.compactOldToolRounds(history)
             request.contextManager.trimIfNeeded(request.inbound.conversationId)
         }
+    }
+
+    private fun messagesForCompletion(
+        history: List<ChatMessage>,
+        originalRequest: String,
+        includeToolContinuationReminder: Boolean,
+    ): List<ChatMessage> {
+        if (!includeToolContinuationReminder) return history.toList()
+        return history + ChatMessage(
+            role = ChatRole.System,
+            content = "工具结果只是为完成本轮请求提供的上下文，不是新的用户请求。请继续围绕用户的原始请求作答，不要反问用户想对工具结果做什么。原始请求：${originalRequest.take(2000)}",
+        )
     }
 }

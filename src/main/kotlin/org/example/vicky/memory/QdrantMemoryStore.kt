@@ -246,19 +246,12 @@ class QdrantMemoryStore(
         collection: String,
         shouldDelete: (VectorRecord) -> Boolean,
     ) {
-        var deleted = 0
-        while (true) {
-            val batch = vectorStore.scrollPayloadOnly(collection, 500, null)
-            if (batch.isEmpty()) break
-            val toDelete = batch.filter(shouldDelete).map { it.id }
-            if (toDelete.isNotEmpty()) {
-                vectorStore.delete(collection, toDelete)
-                deleted += toDelete.size
-            }
-            if (batch.size < 500) break
-        }
-        if (deleted > 0) {
-            println("[Vicky] 清理过期记忆: collection=$collection, deleted=$deleted")
+        val toDelete = vectorStore.scrollPayloadOnly(collection, Int.MAX_VALUE, null)
+            .filter(shouldDelete)
+            .map { it.id }
+        toDelete.chunked(500).forEach { vectorStore.delete(collection, it) }
+        if (toDelete.isNotEmpty()) {
+            println("[Vicky] 清理过期记忆: collection=$collection, deleted=${toDelete.size}")
         }
     }
 

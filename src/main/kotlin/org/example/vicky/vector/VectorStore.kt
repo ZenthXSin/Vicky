@@ -52,6 +52,7 @@ interface VectorStore {
         collection: String,
         limit: Int,
         filter: Map<String, Any>? = null,
+        offset: Int = 0,
     ): List<VectorRecord>
 
     /** 仅加载 payload，不返回向量数据。用于只需要元数据的场景。 */
@@ -59,7 +60,8 @@ interface VectorStore {
         collection: String,
         limit: Int,
         filter: Map<String, Any>? = null,
-    ): List<VectorRecord> = scroll(collection, limit, filter)
+        offset: Int = 0,
+    ): List<VectorRecord> = scroll(collection, limit, filter, offset)
 
     /** 确保 collection 存在，不存在则创建。 */
     suspend fun ensureCollection(collection: String, dimension: Int)
