@@ -5,6 +5,8 @@ import com.aallam.openai.api.chat.ChatMessage
 import com.aallam.openai.api.chat.ChatRole
 import com.aallam.openai.client.OpenAI
 import org.example.vicky.agent.AgentConfig
+import org.example.vicky.io.estimatedContentChars
+import org.example.vicky.io.textContentOrNull
 
 /**
  * 上下文压缩器，提供两级上下文管理：
@@ -163,7 +165,7 @@ class ContextCompactor(
                 ChatRole.Tool -> "Tool(${msg.name ?: "?"})"
                 else -> msg.role.toString()
             }
-            val content = msg.content?.take(2000) ?: "(empty)"
+            val content = msg.textContentOrNull()?.take(2000) ?: "(non-text content)"
             "[$role]: $content"
         }
 
@@ -187,7 +189,7 @@ class ContextCompactor(
     }
 
     private fun ChatMessage.estimateChars(): Int {
-        val contentLen = (content ?: "").length
+        val contentLen = estimatedContentChars()
         val toolCallsLen = toolCalls?.sumOf { tc ->
             when (tc) {
                 is com.aallam.openai.api.chat.ToolCall.Function -> tc.function.arguments.length

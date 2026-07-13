@@ -25,6 +25,8 @@ dependencies {
     api("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
     api("io.modelcontextprotocol:kotlin-sdk-client:0.13.0")
+
+    testImplementation(kotlin("test"))
 }
 
 java {
@@ -39,6 +41,13 @@ kotlin {
     sourceSets.main {
         kotlin.srcDir("kotlin")
     }
+    sourceSets.test {
+        kotlin.srcDir("test/kotlin")
+    }
+}
+
+tasks.test {
+    useJUnitPlatform()
 }
 
 mavenPublishing {

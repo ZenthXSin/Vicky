@@ -3,6 +3,7 @@ package org.example.vicky.context
 import com.aallam.openai.api.chat.ChatMessage
 import com.aallam.openai.api.chat.ChatRole
 import org.example.vicky.agent.AgentMode
+import org.example.vicky.io.textContentOrNull
 import org.example.vicky.tool.ToolRegistry
 
 /**
@@ -37,7 +38,7 @@ class DefaultContextManager(
             val m = history[i]
             when {
                 m.role == ChatRole.Tool -> {
-                    val original = m.content ?: continue
+                    val original = m.textContentOrNull() ?: continue
                     if (original.startsWith(SUMMARY_PREFIX)) continue
                     val status = if (original.trimStart().startsWith("Error")) "failed" else "ok"
                     history[i] = ChatMessage(

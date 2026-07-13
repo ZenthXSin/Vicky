@@ -14,6 +14,9 @@ import org.example.vicky.context.ContextManager
 import org.example.vicky.io.InboundMessage
 import org.example.vicky.io.MessageSink
 import org.example.vicky.io.OutboundMessage
+import org.example.vicky.io.estimatedContentChars
+import org.example.vicky.io.textContentOrNull
+import org.example.vicky.io.toChatMessage
 import org.example.vicky.llm.OpenAiClientFactory
 import org.example.vicky.session.Session
 import org.example.vicky.session.SessionStore
@@ -153,7 +156,7 @@ abstract class Agent(
         // 子类 recall 记忆注入
         onTurnStart(msg, history)
 
-        history += ChatMessage(role = ChatRole.User, content = msg.content)
+        history += msg.toChatMessage()
 
         suspend fun emit(out: OutboundMessage) {
             sink.emit(out)
@@ -180,7 +183,7 @@ abstract class Agent(
 
         try {
             repeat(config.maxSteps) { step ->
-                val ctxEstimate = history.sumOf { (it.content ?: "").length } / 3
+                val ctxEstimate = history.sumOf { it.estimatedContentChars() } / 3
                 log("step ${step + 1}/${config.maxSteps} -> requesting completion (${history.size} msgs, ~${ctxEstimate}tk in)")
                 val request = ChatCompletionRequest(
                     model = config.model,
@@ -435,7 +438,7 @@ abstract class Agent(
         for (msg in history) {
             when (msg.role) {
                 ChatRole.System -> {
-                    val content = msg.content ?: ""
+                    val content = msg.textContentOrNull().orEmpty()
                     if (content.startsWith("[context-summary]")) {
                         summaryChars += content.length
                     } else {
@@ -443,9 +446,9 @@ abstract class Agent(
                         if (systemBreakdown.isEmpty()) systemBreakdown = breakdownSystemPrompt(content)
                     }
                 }
-                ChatRole.User -> { chatChars += (msg.content ?: "").length; chatMsgCount++ }
+                ChatRole.User -> { chatChars += msg.estimatedContentChars(); chatMsgCount++ }
                 ChatRole.Assistant -> {
-                    val contentLen = (msg.content ?: "").length
+                    val contentLen = msg.estimatedContentChars()
                     val toolLen = msg.toolCalls?.sumOf { tc ->
                         when (tc) {
                             is ToolCall.Function -> (tc.function.argumentsOrNull?.length ?: 0) + (tc.function.nameOrNull?.length ?: 0)
@@ -459,7 +462,7 @@ abstract class Agent(
                         toolRounds++
                     }
                 }
-                ChatRole.Tool -> toolResultChars += (msg.content ?: "").length
+                ChatRole.Tool -> toolResultChars += msg.estimatedContentChars()
                 else -> {}
             }
         }

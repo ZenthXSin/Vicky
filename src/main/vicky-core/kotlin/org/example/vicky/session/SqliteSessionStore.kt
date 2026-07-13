@@ -2,7 +2,12 @@ package org.example.vicky.session
 
 import com.aallam.openai.api.chat.ChatMessage
 import com.aallam.openai.api.chat.ChatRole
+import com.aallam.openai.api.chat.ContentPart
 import com.aallam.openai.api.chat.FunctionCall
+import com.aallam.openai.api.chat.ImagePart
+import com.aallam.openai.api.chat.ListContent
+import com.aallam.openai.api.chat.TextContent
+import com.aallam.openai.api.chat.TextPart
 import com.aallam.openai.api.chat.ToolCall
 import com.aallam.openai.api.chat.ToolId
 import kotlinx.serialization.Serializable
@@ -76,6 +81,7 @@ class SqliteSessionStore(dataDir: File) : SessionStore {
 internal data class MsgDto(
     val role: String,
     val content: String? = null,
+    val parts: List<ContentPartDto>? = null,
     val toolCallId: String? = null,
     val name: String? = null,
     val toolCalls: List<ToolCallDto>? = null,
@@ -84,25 +90,88 @@ internal data class MsgDto(
 @Serializable
 internal data class ToolCallDto(val id: String, val name: String?, val args: String?)
 
-internal fun ChatMessage.toDto() = MsgDto(
-    role = role.role,
-    content = content,
-    toolCallId = toolCallId?.id,
-    name = name,
-    toolCalls = toolCalls?.filterIsInstance<ToolCall.Function>()?.map {
-        ToolCallDto(it.id.id, it.function.nameOrNull, it.function.argumentsOrNull)
-    },
+@Serializable
+internal data class ContentPartDto(
+    val type: String,
+    val text: String? = null,
+    val imageUrl: String? = null,
+    val imageDetail: String? = null,
 )
 
-internal fun MsgDto.toMsg() = ChatMessage(
-    role = ChatRole(role),
-    content = content,
-    toolCallId = toolCallId?.let { ToolId(it) },
-    name = name,
-    toolCalls = toolCalls?.map {
+internal fun ChatMessage.toDto(): MsgDto {
+    val textContent: String?
+    val contentParts: List<ContentPartDto>?
+    when (val value = messageContent) {
+        null -> {
+            textContent = null
+            contentParts = null
+        }
+        is TextContent -> {
+            textContent = value.content
+            contentParts = null
+        }
+        is ListContent -> {
+            textContent = null
+            contentParts = value.content.mapNotNull { part ->
+                when (part) {
+                    is TextPart -> ContentPartDto(type = "text", text = part.text)
+                    is ImagePart -> ContentPartDto(
+                        type = "image_url",
+                        imageUrl = part.imageUrl.url,
+                        imageDetail = part.imageUrl.detail,
+                    )
+                    else -> null
+                }
+            }
+        }
+        else -> {
+            textContent = null
+            contentParts = null
+        }
+    }
+    return MsgDto(
+        role = role.role,
+        content = textContent,
+        parts = contentParts,
+        toolCallId = toolCallId?.id,
+        name = name,
+        toolCalls = toolCalls?.filterIsInstance<ToolCall.Function>()?.map {
+            ToolCallDto(it.id.id, it.function.nameOrNull, it.function.argumentsOrNull)
+        },
+    )
+}
+
+internal fun MsgDto.toMsg(): ChatMessage {
+    val mappedToolCalls = toolCalls?.map {
         ToolCall.Function(
             id = ToolId(it.id),
             function = FunctionCall(nameOrNull = it.name, argumentsOrNull = it.args),
         )
-    },
-)
+    }
+    val mappedParts: List<ContentPart>? = parts?.mapNotNull { part ->
+        when (part.type) {
+            "text" -> part.text?.let(::TextPart)
+            "image_url" -> part.imageUrl?.let { ImagePart(it, part.imageDetail ?: "auto") }
+            else -> null
+        }
+    }
+    val mappedRole = ChatRole(role)
+    val mappedToolCallId = toolCallId?.let(::ToolId)
+    return if (mappedParts != null) {
+        ChatMessage(
+            role = mappedRole,
+            content = mappedParts,
+            toolCallId = mappedToolCallId,
+            name = name,
+            toolCalls = mappedToolCalls,
+        )
+    } else {
+        ChatMessage(
+            role = mappedRole,
+            content = content,
+            toolCallId = mappedToolCallId,
+            name = name,
+            toolCalls = mappedToolCalls,
+        )
+    }
+}
